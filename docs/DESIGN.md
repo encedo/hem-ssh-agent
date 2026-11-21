@@ -64,31 +64,55 @@ signs an SSHSIG structure holding a hash of the message, so the HEM's
 Every sign needs a token with scope `keymgmt:use:<kid>` (role M is refused).
 Two ways to get one, both from hem-sdk-rust:
 
-- **Password** (`authorize_password`): asked once at login; the agent keeps
-  the derived X25519 key (not the password) for the session and mints
-  short-lived tokens as they expire. Works offline / air-gapped.
-- **Phone approval** (`authorize_remote`, broker + encedo-authenticator): no
-  password on the computer; the phone shows a note such as
-  `ssh: git@gitlab.com` and can require biometrics (`uv=bio`). Approval per
-  token, so the token lifetime sets how often the phone asks.
+- **Password** (`auth = "password"`, `authorize_password`): the agent starts
+  **locked** (no keys listed, as a locked OpenSSH agent). `ssh-add -X` sends
+  the HEM password over the agent socket / pipe (OpenSSH's own prompt, no UI
+  of ours); the agent keeps the derived X25519 key (not the password) and
+  mints a token of `ttl` seconds whenever the last one has expired.
+  `ssh-add -x` drops the derived key and the token (the lock passphrase is
+  not used). `run --login` asks on the terminal instead. Works air-gapped.
+- **Phone approval** (`auth = "remote"`, `authorize_remote`, broker +
+  encedo-authenticator): no password on the computer. When a sign needs a
+  new token the phone shows a note and asks for biometrics (`uv=bio`, or
+  `pin`); the token lifetime is the phone's answer (1 h seen), so the phone
+  asks once per token, not per sign. `ssh-add -x` drops the token. The
+  agent waits `approve_timeout` seconds (default 90; hem-sdk-js 60 s was
+  too short in tests - approvals took 20-44 s and two ran out); sshd's
+  default `LoginGraceTime` is 120 s.
 
-One token can carry up to 8 scopes, so all configured keys share one token.
+The note is read from the data to sign, nothing invented (`src/note.rs`):
+an SSH user-auth request (RFC 4252 section 7) gives
+`ssh login as <user> · <key label> · <computer>`, an SSHSIG (PROTOCOL.sshsig)
+`sign (<namespace>) · ...`, e.g. `sign (git)`, anything else `sign · ...`.
+The server's host name is not in the signed data, so it cannot be shown.
 
-Tokens are short-lived on purpose (`run --ttl`, default 300 s). Prototype
-(v0.1): the password is asked once at `run`, the derived key is kept
-(`AuthOptions::remember`), and a new token is minted on the first sign after
-expiry, without asking again. Whether a session should instead end with the
-token (ask again: terminal, `ssh-add -X` unlock, or the phone) is open.
+One token carries the scopes of all configured keys (up to 8 keys).
+The agent keeps the last token while it is valid: a sign within its lifetime
+needs no check-in, no login and no phone. Parallel signs wait for one token,
+so the phone asks once.
 
-## Configuration (planned)
+**Check-in before every new token** (`hem_checkin`, it also sets the HEM
+clock): required in remote mode, tried in password mode and skipped with a
+warning when the broker is unreachable (air gap).
 
-A TOML file in the platform config directory: HEM URL, keys (by kid or by a
-label prefix), auth mode, token lifetime, confirm-per-sign. The HEM URL may
-come from the environment for tests.
+On the first token the agent compares each configured public key with the
+HEM's and refuses to sign on a mismatch.
+
+## Configuration
+
+`config.toml` in `%APPDATA%\hem-ssh-agent\` (Windows) or
+`~/.config/hem-ssh-agent/` (Linux, macOS); `--config` overrides. Format in
+`src/config.rs`: `url`, `auth`, `uv`, `ttl`, `approve_timeout`, `listen`, and `[[key]]` entries
+with `kid` and `pubkey` (the line `hem-ssh-agent pubkey` prints). The public
+key is in the file so the agent lists keys without a token: no phone prompt
+just to list.
 
 ## Security notes
 
-- Socket / pipe accessible to the current user only.
+- Socket / pipe accessible to the current user only. Windows: the pipe's
+  access list is `D:P(A;;GA;;;SY)(A;;GA;;;<user SID>)`, remote clients
+  refused; checked with .NET `GetAccessControl` (2026-11-21). Unix: 0600
+  socket in a 0700 directory.
 - Agent forwarding (`ssh -A`) lets a remote host ask for signatures while the
   session lasts - document it; optional confirm-per-sign.
 - The agent holds a derived key or a token in memory, never the password;
@@ -98,8 +122,12 @@ come from the environment for tests.
 ## Code layout
 
 ```
-src/agent.rs    HemAgent: the agent protocol answered from the HEM (no platform code)
-src/listen.rs   transports: Windows named pipe / unix socket (the only #[cfg] code)
+src/agent.rs    HemAgent: the agent protocol answered from the HEM, lock / unlock,
+                password or phone tokens (no platform code)
+src/note.rs     the note shown on the phone, read from the data to sign
+src/config.rs   config.toml
+src/listen.rs   transports: Windows named pipe (own listener with an access
+                list, the only unsafe code) / unix socket - the only #[cfg] code
 src/main.rs     CLI: keys, pubkey, run
 tests/live.rs   end to end through the real transport and an agent client (HEM_URL)
 ```
@@ -127,6 +155,12 @@ Windows 2.56 (bundled OpenSSH 10.5p1):
   `core.sshCommand=C:/Windows/System32/OpenSSH/ssh.exe`.
 - The Windows `ssh-agent` service must be stopped (it owns the same pipe);
   `run` fails with a clear message when the pipe is taken.
+- Phone approval (encedo-authenticator 2.0.0-dev.19, Android, `uv=bio`):
+  `ssh` to the macOS host waited for the approval (about 20 s) and logged in;
+  a second `ssh` within the token lifetime did not ask the phone. A refusal
+  on the phone (`denied`), or no answer in 60 s, makes the agent refuse the
+  sign: `ssh` reports "agent refused operation" and is not logged in. The
+  token's `actx` carried `uvm: bio`.
 
 ## Plan
 
@@ -134,16 +168,16 @@ Windows 2.56 (bundled OpenSSH 10.5p1):
    the agent on the OpenSSH named pipe `\\.\pipe\openssh-ssh-agent`; test with
    Windows `ssh.exe`, `git push`, commit signing. **Prototype done** (above);
    `git push` to a real remote not tried yet.
-2. Pageant transport (plink, PuTTY, TortoiseGit).
+   Then: config file, start locked + `ssh-add -X`, phone approval, pipe
+   access list - **done** (2026-11-21).
+2. Windows: autostart at logon without a console window (Task Scheduler,
+   log to a file); Pageant transport (plink, PuTTY, TortoiseGit) with
+   forwarding of other keys to the real Pageant / OpenSSH agent.
 3. Linux: unix socket (`SSH_AUTH_SOCK`), then macOS.
-4. Phone approval, confirm-per-sign, config file, packaging (signed binaries).
+4. Confirm-per-sign, packaging (signed binaries).
 
 ## Open
 
-- How the background agent asks for the password: a terminal `login`
-  command talking to the running agent, `ssh-add -X` (agent unlock carries a
-  passphrase), or a prompt reused from onchato / encedo-wg (decision 5).
-- Token expiry: keep the derived key and refresh silently (prototype) or end
-  the session with the token and ask again (see Authorisation and tokens).
-- Named pipe access list: the prototype uses the tokio default (remote
-  clients refused, default DACL); restrict it to the current user.
+- Password mode: keep the derived key until `ssh-add -x` (now) or drop it
+  with each token and ask again.
+- A GUI prompt (onchato / encedo-wg) instead of `ssh-add -X`, if needed.

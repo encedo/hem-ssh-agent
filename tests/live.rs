@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use hem_sdk::{AuthOptions, CreateOptions, Hem, HemOptions, SearchOptions};
-use hem_ssh_agent::{key_scopes, listen, load_key, HemAgent};
+use hem_ssh_agent::{key_scopes, listen, load_key, Auth, HemAgent};
 use ssh_agent_lib::agent::Session;
 use ssh_agent_lib::client::Client;
 use ssh_agent_lib::proto::{PublicCredential, SignRequest};
@@ -36,20 +36,20 @@ async fn agent_lists_and_signs() {
         }
     };
 
-    // As `run` does: one token for the key scopes, then the public keys.
-    let auth = AuthOptions { exp_seconds: 60, ..Default::default() };
-    let tok = hem.authorize_password(None, key_scopes(&[&kid]), auth.clone()).await.unwrap();
+    // The public key, as `pubkey` prints it for the configuration file.
+    let tok = hem.authorize_password(None, key_scopes(&[&kid]), AuthOptions::default()).await.unwrap();
     let key = load_key(&hem, &tok, &kid).await.unwrap();
     let KeyData::Ed25519(Ed25519PublicKey(pk)) = key.public.clone() else { panic!("not Ed25519") };
     assert!(key.openssh().starts_with("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"));
 
-    // Serve on a private address, connect as a client would.
+    // A fresh device handle for the agent: nothing remembered, starts locked.
+    let agent_hem = Arc::new(Hem::new(&url, HemOptions::default()).unwrap());
     #[cfg(windows)]
     let address = format!(r"\\.\pipe\hem-ssh-agent-test-{}", std::process::id());
     #[cfg(unix)]
     let address = std::env::temp_dir().join(format!("hem-ssh-agent-test-{}.sock", std::process::id())).to_string_lossy().into_owned();
     let listener = listen::bind(&address).await.unwrap();
-    tokio::spawn(listen::serve(listener, HemAgent::new(hem.clone(), vec![key.clone()], auth)));
+    tokio::spawn(listen::serve(listener, HemAgent::new(agent_hem, vec![key.clone()], Auth::Password { ttl: 60 })));
 
     #[cfg(windows)]
     let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(&address).unwrap();
@@ -57,6 +57,15 @@ async fn agent_lists_and_signs() {
     let stream = tokio::net::UnixStream::connect(&address).await.unwrap();
     let mut client = Client::new(stream);
 
+    // Locked: no keys, no signature; a wrong password does not unlock.
+    assert!(client.request_identities().await.unwrap().is_empty());
+    let req = SignRequest { credential: PublicCredential::Key(key.public.clone()), data: b"x".to_vec(), flags: 0 };
+    assert!(client.sign(req).await.is_err());
+    assert!(client.unlock("not the password".into()).await.is_err());
+    assert!(client.request_identities().await.unwrap().is_empty());
+
+    // `ssh-add -X` with the HEM password.
+    client.unlock(password.clone()).await.unwrap();
     let ids = client.request_identities().await.unwrap();
     assert_eq!(ids.len(), 1);
     assert_eq!(ids[0].credential, PublicCredential::Key(key.public.clone()));
@@ -78,9 +87,15 @@ async fn agent_lists_and_signs() {
     // A key the agent does not serve: FAILURE.
     let other = KeyData::Ed25519(Ed25519PublicKey([7u8; 32]));
     assert!(client
-        .sign(SignRequest { credential: PublicCredential::Key(other), data, flags: 0 })
+        .sign(SignRequest { credential: PublicCredential::Key(other), data: data.clone(), flags: 0 })
         .await
         .is_err());
+
+    // `ssh-add -x`: locked again, the derived key dropped.
+    client.lock(String::new()).await.unwrap();
+    assert!(client.request_identities().await.unwrap().is_empty());
+    let req = SignRequest { credential: PublicCredential::Key(key.public.clone()), data, flags: 0 };
+    assert!(client.sign(req).await.is_err());
 
     #[cfg(unix)]
     let _ = std::fs::remove_file(&address);

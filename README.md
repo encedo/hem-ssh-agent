@@ -4,8 +4,9 @@ An SSH agent whose keys live in an [Encedo HEM](https://encedo.com). Use a
 non-exportable Ed25519 key for `ssh`, `git` over SSH and git commit signing,
 with your usual clients: OpenSSH, Git, PuTTY / plink (Pageant).
 
-Status: experiment; a first prototype works on Windows (Ed25519, password
-login). See [docs/DESIGN.md](docs/DESIGN.md).
+Status: experiment; works on Windows (Ed25519): password unlock through
+`ssh-add -X`, or approval on the phone (encedo-authenticator, biometrics).
+See [docs/DESIGN.md](docs/DESIGN.md).
 
 Built on [hem-sdk-rust](https://github.com/encedo/hem-sdk-rust).
 
@@ -14,16 +15,33 @@ Built on [hem-sdk-rust](https://github.com/encedo/hem-sdk-rust).
 ```bash
 git clone --recurse-submodules https://github.com/encedo/hem-ssh-agent
 cd hem-ssh-agent && cargo build --release
-export HEM_URL=https://my.ence.do          # your HEM
 
-hem-ssh-agent keys                         # Ed25519 keys in the HEM: kid + label
-hem-ssh-agent pubkey --kid <kid>           # line for authorized_keys / GitHub
-hem-ssh-agent run --kid <kid> [--ttl 300]  # asks for the HEM password once
+hem-ssh-agent keys   --url https://my.ence.do            # Ed25519 keys: kid + label
+hem-ssh-agent pubkey --url https://my.ence.do --kid <kid> # line for config / authorized_keys / GitHub
 ```
 
-`run` listens on the Windows OpenSSH pipe (`\\.\pipe\openssh-ssh-agent`; stop
-the Windows `ssh-agent` service first) or, on Linux / macOS, on a socket it
-prints as `export SSH_AUTH_SOCK=...`.
+`config.toml` in `%APPDATA%\hem-ssh-agent\` (Windows) or
+`~/.config/hem-ssh-agent/` (Linux, macOS):
+
+```toml
+url  = "https://my.ence.do"
+auth = "remote"        # "password": unlock with `ssh-add -X`; "remote": approve on the phone
+uv   = "bio"           # remote: "bio" | "pin" | "none"
+ttl  = 300             # password: token lifetime, seconds
+approve_timeout = 90   # remote: seconds to wait for the phone
+
+[[key]]
+kid    = "<kid>"
+pubkey = "ssh-ed25519 AAAA... label"   # the pubkey output
+```
+
+```bash
+hem-ssh-agent run      # password mode starts locked: ssh-add -X; ssh-add -x locks
+```
+
+`run` listens on the Windows OpenSSH pipe (`\\.\pipe\openssh-ssh-agent`, for
+the current user only; stop the Windows `ssh-agent` service first) or, on
+Linux / macOS, on a socket it prints as `export SSH_AUTH_SOCK=...`.
 
 Windows with Git: use the system OpenSSH, not Git's bundled one:
 
