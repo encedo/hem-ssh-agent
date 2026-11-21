@@ -128,7 +128,9 @@ src/note.rs     the note shown on the phone, read from the data to sign
 src/config.rs   config.toml
 src/listen.rs   transports: Windows named pipe (own listener with an access
                 list, the only unsafe code) / unix socket - the only #[cfg] code
-src/main.rs     CLI: keys, pubkey, run
+src/app.rs      CLI: keys, pubkey, run, install, uninstall; logging
+src/main.rs     hem-ssh-agent.exe (console)
+src/bin/hem-ssh-agentw.rs   hem-ssh-agentw.exe (Windows, no console: run in the background)
 tests/live.rs   end to end through the real transport and an agent client (HEM_URL)
 ```
 
@@ -170,9 +172,16 @@ Windows 2.56 (bundled OpenSSH 10.5p1):
    `git push` to a real remote not tried yet.
    Then: config file, start locked + `ssh-add -X`, phone approval, pipe
    access list - **done** (2026-11-21).
-2. Windows: autostart at logon without a console window (Task Scheduler,
-   log to a file); Pageant transport (plink, PuTTY, TortoiseGit) with
-   forwarding of other keys to the real Pageant / OpenSSH agent.
+2. Windows: autostart at logon without a console window - **done**
+   (2026-11-21): `hem-ssh-agentw.exe` (GUI subsystem, `run` only, log to
+   `%LOCALAPPDATA%\hem-ssh-agent\agent.log`, moved to `.old` over 1 MB);
+   `install [--start]` / `uninstall` set the `hem-ssh-agent` value under
+   `HKCU\...\CurrentVersion\Run` (per user, no administrator rights - a
+   Task Scheduler logon trigger usually needs them) and warn when the
+   Windows OpenSSH agent service can run. A second instance exits with a
+   log line (pipe taken). Next: Pageant transport (plink, PuTTY,
+   TortoiseGit) that coexists with the user's running Pageant (forwarding
+   other keys to it), never replacing it.
 3. Linux: unix socket (`SSH_AUTH_SOCK`), then macOS.
 4. Confirm-per-sign, packaging (signed binaries).
 

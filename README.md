@@ -39,6 +39,14 @@ pubkey = "ssh-ed25519 AAAA... label"   # the pubkey output
 hem-ssh-agent run      # password mode starts locked: ssh-add -X; ssh-add -x locks
 ```
 
+Windows, start at logon without a console window (current user, no
+administrator rights; `hem-ssh-agentw.exe` must sit next to `hem-ssh-agent.exe`):
+
+```
+hem-ssh-agent install --start     # log: %LOCALAPPDATA%\hem-ssh-agent\agent.log
+hem-ssh-agent uninstall           # then: taskkill /IM hem-ssh-agentw.exe
+```
+
 `run` listens on the Windows OpenSSH pipe (`\\.\pipe\openssh-ssh-agent`, for
 the current user only; stop the Windows `ssh-agent` service first) or, on
 Linux / macOS, on a socket it prints as `export SSH_AUTH_SOCK=...`.

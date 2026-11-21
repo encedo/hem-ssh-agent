@@ -5,6 +5,7 @@
 //! platform-specific part (named pipe on Windows, unix socket elsewhere).
 
 pub mod agent;
+pub mod app;
 pub mod config;
 pub mod listen;
 pub mod note;
