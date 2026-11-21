@@ -634,6 +634,7 @@ name = "hem-ssh-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "clap",
  "ed25519-dalek",
  "env_logger",
@@ -641,6 +642,7 @@ dependencies = [
  "log",
  "rpassword",
  "serde",
+ "serde_json",
  "ssh-agent-lib",
  "ssh-key",
  "tokio",

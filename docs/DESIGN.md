@@ -24,10 +24,9 @@ never leaves the HEM; the agent only forwards signing requests.
    possible: only the transport layer (and, if one is needed, the prompt) is
    platform-specific. Development and first tests on the Windows machine,
    then Linux (a VM on macOS), then macOS.
-5. **GUI only if needed, reused, not new.** A password prompt or a sign
-   approval window comes from what Encedo already has: onchato
-   (encedo-chat, Tauri app `impl/src-tauri`) or encedo-wg. The agent itself
-   stays a headless process.
+5. **GUI reused, not new: encedo-wg-hsm's** (Go + Fyne; decided
+   2026-11-21 over onchato's Tauri). A separate process in `gui/`; the agent
+   stays headless and gets a control channel (below).
 6. **Key type first: Ed25519** (`ssh-ed25519`). The HEM signs pure Ed25519
    (`POST /api/crypto/exdsa/sign`, `alg: "Ed25519"`, RFC 8032), exactly what
    SSH needs. ECDSA P-256 (`ecdsa-sha2-nistp256`) later: the HEM signs a
@@ -98,6 +97,39 @@ warning when the broker is unreachable (air gap).
 On the first token the agent compares each configured public key with the
 HEM's and refuses to sign on a mismatch.
 
+## Control channel (the GUI)
+
+The GUI (`gui/`, Go + Fyne, from encedo-wg-hsm) is a separate process; the
+agent stays headless and is driven over a second pipe / socket
+(`src/control.rs`): `\\.\pipe\hem-ssh-agent-control` (Windows, the same
+access list as the agent's pipe) or `hem-ssh-agent-control.sock` next to the
+agent's socket (unix, 0600); `control` in `config.toml` or `run --control`
+overrides it. The framing and message shape are encedo-wg-hsm
+`internal/ipc`'s: a four-byte big-endian length, then JSON, at most 64 KiB.
+
+| Request | Answer |
+|---|---|
+| `{"op":"whoami"}` | `reply` with `build` and `who` (the caller's SID and pid on Windows, uid and pid on unix) |
+| `{"op":"watch"}` | `reply`, then an `event` snapshot now and on every change |
+| `{"op":"token","build":{...},"token":"..."}` | `reply` ok, or `kind` `build` / `invalid_arg` / a hem-sdk code |
+| `{"op":"lock"}` | `reply`; drops the token and the derived key |
+
+The snapshot (`Status`): `state` (`locked` / `ready` / `waiting` for the
+phone), `auth`, `url` (the HEM the window logs in to), `ttl` (password
+mode: the lifetime to ask for), `keys` (kid, comment), `expires_at` (unix seconds, read from
+the token), `pending` (the note on the phone and since when), `last` (the
+last sign's note, `signed` / `denied` / `timeout` / `locked` / `failed`, and
+when). A whole snapshot every time, never a delta.
+
+**Only the token crosses.** The window logs in to the HEM itself (password,
+via hem-sdk-go, check-in first) and hands over a token holding
+`keymgmt:use:<kid>` for every served key; the agent checks `exp`, the
+scopes and, through the HEM, the configured public keys. No password and no
+derived key are ever sent (`Request` refuses unknown fields). When the token
+expires, new signs fail until the window - or `ssh-add -X` - gives another;
+the agent has nothing to renew it with. A window from a different build is
+refused a `token` (`build` names both).
+
 ## Configuration
 
 `config.toml` in `%APPDATA%\hem-ssh-agent\` (Windows) or
@@ -126,12 +158,16 @@ src/agent.rs    HemAgent: the agent protocol answered from the HEM, lock / unloc
                 password or phone tokens (no platform code)
 src/note.rs     the note shown on the phone, read from the data to sign
 src/config.rs   config.toml
+src/control.rs  the GUI's control channel: framing, requests, snapshots
 src/listen.rs   transports: Windows named pipe (own listener with an access
-                list, the only unsafe code) / unix socket - the only #[cfg] code
+                list, the caller's SID; the only unsafe code) / unix socket -
+                the only #[cfg] code
 src/app.rs      CLI: keys, pubkey, run, install, uninstall; logging
 src/main.rs     hem-ssh-agent.exe (console)
 src/bin/hem-ssh-agentw.rs   hem-ssh-agentw.exe (Windows, no console: run in the background)
 tests/live.rs   end to end through the real transport and an agent client (HEM_URL)
+tests/control.rs  the control channel through the real transport, offline
+gui/            the GUI (Go + Fyne); hem-sdk-go as a submodule
 ```
 
 Agent protocol: `ssh-agent-lib` 0.6 (MIT/Apache-2.0; framing, messages,
@@ -189,4 +225,6 @@ Windows 2.56 (bundled OpenSSH 10.5p1):
 
 - Password mode: keep the derived key until `ssh-add -x` (now) or drop it
   with each token and ask again.
-- A GUI prompt (onchato / encedo-wg) instead of `ssh-add -X`, if needed.
+- The GUI: tray state, phone-approval notifications, the password window
+  handing over tokens; then autostart of the GUI instead of
+  `hem-ssh-agentw.exe`.

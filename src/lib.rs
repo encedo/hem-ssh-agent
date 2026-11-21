@@ -2,11 +2,13 @@
 //!
 //! `agent` is the platform-independent core (the agent protocol answered from
 //! the HEM, lock / unlock, password or phone approval); `listen` is the only
-//! platform-specific part (named pipe on Windows, unix socket elsewhere).
+//! platform-specific part (named pipe on Windows, unix socket elsewhere);
+//! `control` is the channel the GUI drives the agent through.
 
 pub mod agent;
 pub mod app;
 pub mod config;
+pub mod control;
 pub mod listen;
 pub mod note;
 

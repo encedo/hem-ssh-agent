@@ -11,6 +11,7 @@
 //! ttl  = 300             # password: token lifetime in seconds
 //! approve_timeout = 90   # remote: seconds to wait for the phone
 //! # listen = '\\.\pipe\openssh-ssh-agent'
+//! # control = '\\.\pipe\hem-ssh-agent-control'   # the GUI's channel
 //!
 //! [[key]]
 //! kid    = "9904cd6be703202a186dd8a2d1bfdb74"
@@ -67,6 +68,9 @@ pub struct Config {
     pub approve_timeout: u32,
     #[serde(default)]
     pub listen: Option<String>,
+    /// The control channel (`src/control.rs`); default `listen::default_control_address`.
+    #[serde(default)]
+    pub control: Option<String>,
     #[serde(default, rename = "key")]
     pub keys: Vec<KeyConfig>,
 }

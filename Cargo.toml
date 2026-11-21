@@ -15,27 +15,33 @@ ssh-agent-lib = "0.6"
 # The version ssh-agent-lib uses: its KeyData / Signature types cross the API.
 ssh-key = "0.6"
 async-trait = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "io-util", "sync", "time"] }
 clap = { version = "4", features = ["derive", "env"] }
 rpassword = "7"
 zeroize = "1"
 log = "0.4"
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
+# The control channel's messages (src/control.rs); hem-sdk uses it too.
+serde_json = "1"
 toml = "0.8"
 
-# The named pipe's access list (src/listen.rs); the version tokio already uses.
+# The named pipe's access list and the control channel's caller (src/listen.rs);
+# the version tokio already uses.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
 # The live test checks the agent's signatures independently, as an SSH server would.
 ed25519-dalek = "2"
+# tests/control.rs builds token-shaped strings (hem-sdk uses the same crate).
+base64 = "0.22"
 
 # PBKDF2 (600 000 iterations, in hem-sdk) is seconds per call unoptimised.
 [profile.dev]

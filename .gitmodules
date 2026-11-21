@@ -1,3 +1,6 @@
 [submodule "hem-sdk-rust"]
 	path = hem-sdk-rust
 	url = https://github.com/encedo/hem-sdk-rust.git
+[submodule "gui/hem-sdk-go"]
+	path = gui/hem-sdk-go
+	url = https://github.com/encedo/hem-sdk-go.git

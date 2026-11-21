@@ -22,6 +22,10 @@ pub type Listener = tokio::net::UnixListener;
 #[cfg(windows)]
 pub const OPENSSH_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
 
+/// The control channel's pipe (`src/control.rs`, the GUI dials it).
+#[cfg(windows)]
+pub const CONTROL_PIPE: &str = r"\\.\pipe\hem-ssh-agent-control";
+
 /// Where the agent listens unless told otherwise.
 pub fn default_address() -> io::Result<String> {
     #[cfg(windows)]
@@ -30,18 +34,63 @@ pub fn default_address() -> io::Result<String> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        let dir = match std::env::var_os("XDG_RUNTIME_DIR") {
-            // Already private to the user (systemd: 0700).
-            Some(d) => std::path::PathBuf::from(d),
-            None => {
-                let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME not set"))?;
-                let d = std::path::PathBuf::from(home).join(".hem-ssh-agent");
-                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d)?;
-                d
-            }
-        };
-        Ok(dir.join("hem-ssh-agent.sock").to_string_lossy().into_owned())
+        Ok(runtime_dir()?.join("hem-ssh-agent.sock").to_string_lossy().into_owned())
+    }
+}
+
+/// Where the control channel listens unless told otherwise: same access
+/// rules as the agent's own address.
+pub fn default_control_address() -> io::Result<String> {
+    #[cfg(windows)]
+    {
+        Ok(CONTROL_PIPE.to_owned())
+    }
+    #[cfg(unix)]
+    {
+        Ok(runtime_dir()?.join("hem-ssh-agent-control.sock").to_string_lossy().into_owned())
+    }
+}
+
+/// A directory private to the user: `XDG_RUNTIME_DIR` (systemd: 0700), else
+/// `~/.hem-ssh-agent` created 0700.
+#[cfg(unix)]
+fn runtime_dir() -> io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    Ok(match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(d) => std::path::PathBuf::from(d),
+        None => {
+            let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME not set"))?;
+            let d = std::path::PathBuf::from(home).join(".hem-ssh-agent");
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d)?;
+            d
+        }
+    })
+}
+
+/// Who is on the other end of an accepted connection, as the platform says:
+/// for the control channel's log and `whoami`. Not an authorisation - the
+/// access list of the pipe / the socket's mode is.
+pub trait Peer {
+    fn who(&self) -> String;
+}
+
+#[cfg(unix)]
+impl Peer for tokio::net::UnixStream {
+    fn who(&self) -> String {
+        match self.peer_cred() {
+            Ok(c) => match c.pid() {
+                Some(pid) => format!("uid {} pid {pid}", c.uid()),
+                None => format!("uid {}", c.uid()),
+            },
+            Err(e) => format!("unknown ({e})"),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Peer for tokio::net::windows::named_pipe::NamedPipeServer {
+    fn who(&self) -> String {
+        pipe::client(self)
     }
 }
 
@@ -97,7 +146,10 @@ mod pipe {
     use windows_sys::Win32::Security::{
         GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     use crate::agent::HemAgent;
 
@@ -120,9 +172,42 @@ mod pipe {
 
     /// The current user's SID as a string (S-1-5-21-...).
     fn user_sid() -> io::Result<String> {
+        // Safety: the pseudo handle of the current process needs no closing.
+        unsafe { process_sid(GetCurrentProcess()) }
+    }
+
+    /// The pipe client's user SID and process id (`whoami`, the log).
+    pub fn client(pipe: &NamedPipeServer) -> String {
+        use std::os::windows::io::AsRawHandle;
+        let mut pid = 0u32;
+        // Safety: the handle is the connected pipe instance, owned by `pipe`.
+        if unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle() as HANDLE, &mut pid) } == 0 {
+            return format!("unknown ({})", io::Error::last_os_error());
+        }
+        // Safety: the process handle is checked and closed here.
+        let sid = unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                Err(io::Error::last_os_error())
+            } else {
+                let r = process_sid(h);
+                CloseHandle(h);
+                r
+            }
+        };
+        match sid {
+            Ok(sid) => format!("{sid} pid {pid}"),
+            Err(e) => format!("pid {pid} ({e})"),
+        }
+    }
+
+    /// The user SID of a process's token, as a string.
+    ///
+    /// Safety: `process` is a valid process handle with query access.
+    unsafe fn process_sid(process: HANDLE) -> io::Result<String> {
         unsafe {
             let mut token: HANDLE = std::ptr::null_mut();
-            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
                 return Err(io::Error::last_os_error());
             }
             let mut len = 0u32;

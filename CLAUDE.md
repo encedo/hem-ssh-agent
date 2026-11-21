@@ -33,6 +33,17 @@ cargo clippy --all-targets -- -D warnings
 
 Windows (GNU toolchain): `~/.cargo/bin` and `C:\mingw64\bin` must be on PATH.
 
+GUI (`gui/`, Go + Fyne, cgo - see `gui/README.md`):
+
+```bash
+cd gui && go vet ./... && go build -trimpath -ldflags "-H=windowsgui" -o ../target/gui/hem-ssh-agent-gui.exe .
+# against a running agent in password mode (its control pipe / socket):
+HEM_CONTROL=<control address> HEM_PASSWORD=... go test -run Live -v .
+```
+
+On the Windows dev machine pass pipe names from PowerShell: Git Bash eats
+the backslashes of `\\.\pipe\...` in arguments and environment variables.
+
 ## Test device
 
 `https://ssh-agent-tester.playground.ence.do` - a HEM simulator for this

@@ -4,14 +4,16 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hem_sdk::{jwt_parse, AuthOptions, Hem, HemError, RemoteOptions, SignOptions, Uv};
+use hem_sdk::{jwt_parse, AuthOptions, Hem, HemError, RemoteOptions, Scope, SignOptions, Uv};
 use ssh_agent_lib::agent::Session;
 use ssh_agent_lib::error::AgentError;
 use ssh_agent_lib::proto::{Identity, PublicCredential, SignRequest};
 use ssh_key::public::{Ed25519PublicKey, KeyData};
 use ssh_key::{Algorithm, PublicKey, Signature};
+use tokio::sync::watch;
 use zeroize::Zeroizing;
 
+use crate::control::{KeyInfo, Last, Pending, Status};
 use crate::note::{computer_name, note};
 
 /// One HEM key served by the agent: its kid and the public half.
@@ -77,6 +79,16 @@ struct State {
     token: Option<(String, i64)>,
     /// Kids whose configured public key was compared with the HEM's.
     verified: HashSet<String>,
+    /// The approval the phone is showing now (for the GUI).
+    pending: Option<Pending>,
+    /// The last sign request and how it ended (for the GUI).
+    last: Option<Last>,
+}
+
+impl State {
+    fn token_valid(&self) -> bool {
+        self.token.as_ref().is_some_and(|(_, exp)| *exp > now() + 5)
+    }
 }
 
 /// The agent: one per process, cloned into every client connection.
@@ -89,24 +101,139 @@ pub struct HemAgent {
     /// Also serialises getting a token, so parallel signs ask the phone once.
     state: Arc<tokio::sync::Mutex<State>>,
     computer: Option<String>,
+    /// The state as the control channel shows it (`watch`).
+    status: watch::Sender<Status>,
+    /// The HEM's address, shown to the window (`with_url`).
+    url: Arc<str>,
 }
 
 impl HemAgent {
     /// Starts locked in password mode (no keys listed until unlocked).
     pub fn new(hem: Arc<Hem>, keys: Vec<AgentKey>, auth: Auth) -> Self {
         let scopes = key_scopes(&keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>());
-        Self {
+        let (status, _) = watch::channel(Status {
+            state: String::new(),
+            auth: String::new(),
+            url: String::new(),
+            ttl: None,
+            keys: Vec::new(),
+            expires_at: None,
+            pending: None,
+            last: None,
+        });
+        let agent = Self {
             hem,
             keys: Arc::new(keys),
             scopes: Arc::new(scopes),
             auth,
             state: Arc::default(),
             computer: computer_name(),
-        }
+            status,
+            url: Arc::from(""),
+        };
+        agent.publish(&State::default());
+        agent
+    }
+
+    /// The HEM's address the window logs in to (the configuration's `url`;
+    /// `Hem` does not expose the one it was made with).
+    pub fn with_url(mut self, url: &str) -> Self {
+        self.url = Arc::from(url);
+        self.publish(&State::default());
+        self
     }
 
     pub fn keys(&self) -> &[AgentKey] {
         &self.keys
+    }
+
+    /// The state now and on every change (the control channel's `watch`).
+    pub fn subscribe(&self) -> watch::Receiver<Status> {
+        self.status.subscribe()
+    }
+
+    fn password_mode(&self) -> bool {
+        matches!(self.auth, Auth::Password { .. })
+    }
+
+    fn snapshot(&self, st: &State) -> Status {
+        let state = if st.pending.is_some() {
+            "waiting"
+        } else if self.password_mode() && !st.unlocked && !st.token_valid() {
+            "locked"
+        } else {
+            "ready"
+        };
+        let now = now();
+        Status {
+            state: state.into(),
+            auth: if self.password_mode() { "password" } else { "remote" }.into(),
+            url: self.url.to_string(),
+            ttl: match self.auth {
+                Auth::Password { ttl } => Some(ttl),
+                Auth::Remote { .. } => None,
+            },
+            keys: self.keys.iter().map(|k| KeyInfo { kid: k.kid.clone(), comment: k.comment.clone() }).collect(),
+            expires_at: st.token.as_ref().map(|(_, exp)| *exp).filter(|exp| *exp > now),
+            pending: st.pending.clone(),
+            last: st.last.clone(),
+        }
+    }
+
+    /// Tells the control channel, when something it shows has changed.
+    fn publish(&self, st: &State) {
+        let next = self.snapshot(st);
+        self.status.send_if_modified(|s| {
+            let changed = *s != next;
+            if changed {
+                *s = next;
+            }
+            changed
+        });
+    }
+
+    /// Shows the state again once the token is no longer used (5 s before
+    /// its `exp`, as the cache): nothing else happens at that moment.
+    fn publish_at_expiry(&self, exp: i64) {
+        let me = self.clone();
+        let wait = (exp - 5 - now()).max(0) as u64 + 1;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            let st = me.state.lock().await;
+            me.publish(&st);
+        });
+    }
+
+    /// The control channel's `token`: a token the window got itself (the
+    /// window logged in to the HEM; only the token crosses). It must not have
+    /// expired, must hold `keymgmt:use:<kid>` for every key served, and the
+    /// HEM must accept it (the configured public keys are checked with it,
+    /// once per key). Returns its `exp`.
+    pub async fn accept_token(&self, token: &str) -> hem_sdk::Result<i64> {
+        let payload = jwt_parse(token).ok_or_else(|| HemError::new("invalid_arg", "not a token"))?;
+        let exp = payload
+            .get("exp")
+            .and_then(|e| e.as_i64())
+            .ok_or_else(|| HemError::new("invalid_arg", "the token has no exp"))?;
+        if exp <= now() + 5 {
+            return Err(HemError::new("invalid_arg", "the token has expired"));
+        }
+        let granted: Scope = payload
+            .get("scope")
+            .cloned()
+            .and_then(|s| serde_json::from_value(s).ok())
+            .ok_or_else(|| HemError::new("invalid_arg", "the token has no scope"))?;
+        let granted = granted.values();
+        if let Some(missing) = self.scopes.iter().find(|s| !granted.contains(&s.as_str())) {
+            return Err(HemError::new("invalid_arg", format!("the token does not hold {missing}")));
+        }
+        let mut st = self.state.lock().await;
+        self.verify_keys(&mut st, token).await?;
+        st.token = Some((token.to_owned(), exp));
+        self.publish(&st);
+        drop(st);
+        self.publish_at_expiry(exp);
+        Ok(exp)
     }
 
     /// Password mode: log in to the HEM and keep the derived key.
@@ -128,6 +255,9 @@ impl HemAgent {
             return Err(e);
         }
         st.unlocked = true;
+        let exp = jwt_parse(&token).and_then(|p| p.get("exp").and_then(|e| e.as_i64())).unwrap_or(0);
+        st.token = Some((token, exp));
+        self.publish(&st);
         log::info!("unlocked");
         Ok(())
     }
@@ -140,11 +270,18 @@ impl HemAgent {
         st.token = None;
         self.hem.clear_keys();
         self.hem.clear_cache();
+        self.publish(&st);
         log::info!("locked");
     }
 
+    /// Password mode with neither the derived key (`ssh-add -X`) nor a valid
+    /// token (from the window): no keys listed, as a locked OpenSSH agent.
     async fn locked(&self) -> bool {
-        matches!(self.auth, Auth::Password { .. }) && !self.state.lock().await.unlocked
+        if !self.password_mode() {
+            return false;
+        }
+        let st = self.state.lock().await;
+        !st.unlocked && !st.token_valid()
     }
 
     fn find(&self, credential: &PublicCredential) -> Option<&AgentKey> {
@@ -160,15 +297,13 @@ impl HemAgent {
     /// password mode (a HEM behind an air gap still works without it).
     async fn token(&self, note: String) -> hem_sdk::Result<String> {
         let mut st = self.state.lock().await;
-        if let Some((t, exp)) = &st.token {
-            if *exp > now() + 5 {
-                return Ok(t.clone());
-            }
+        if st.token_valid() {
+            return Ok(st.token.as_ref().expect("valid").0.clone());
         }
         let token = match &self.auth {
             Auth::Password { ttl } => {
                 if !st.unlocked {
-                    return Err(HemError::new("auth_password_required", "agent locked: ssh-add -X"));
+                    return Err(HemError::new("auth_password_required", "agent locked: ssh-add -X or the window"));
                 }
                 if let Err(e) = self.hem.hem_checkin().await {
                     log::warn!("check-in failed, logging in without it: {} ({e})", e.code);
@@ -177,15 +312,32 @@ impl HemAgent {
                 self.hem.authorize_password(None, self.scopes.to_vec(), opts).await?
             }
             Auth::Remote { uv, timeout } => {
-                self.hem.hem_checkin().await?;
-                let opts = RemoteOptions { require: *uv, note: Some(note), poll_timeout: *timeout, ..Default::default() };
-                self.hem.authorize_remote(self.scopes.to_vec(), opts).await?
+                st.pending = Some(Pending { note: note.clone(), since: now() });
+                self.publish(&st);
+                let approved = async {
+                    self.hem.hem_checkin().await?;
+                    let opts =
+                        RemoteOptions { require: *uv, note: Some(note), poll_timeout: *timeout, ..Default::default() };
+                    self.hem.authorize_remote(self.scopes.to_vec(), opts).await
+                }
+                .await;
+                st.pending = None; // published with the sign's result
+                approved?
             }
         };
         self.verify_keys(&mut st, &token).await?;
         let exp = jwt_parse(&token).and_then(|p| p.get("exp").and_then(|e| e.as_i64())).unwrap_or(0);
         st.token = Some((token.clone(), exp));
+        drop(st);
+        self.publish_at_expiry(exp);
         Ok(token)
+    }
+
+    /// Records how a sign ended, for the control channel.
+    async fn record(&self, what: &str, result: &str) {
+        let mut st = self.state.lock().await;
+        st.last = Some(Last { note: what.to_owned(), result: result.to_owned(), at: now() });
+        self.publish(&st);
     }
 
     /// Once per key: the configured public key must be the HEM's, or the
@@ -228,13 +380,22 @@ impl Session for HemAgent {
         };
         let what = note(&req.data, &key.comment, self.computer.as_deref());
         log::info!("sign: {} - {what}", key.kid);
-        let token = self.token(what).await.map_err(|e| failed(&key.kid, "token", e))?;
-        let sig = self
-            .hem
-            .exdsa_sign(&token, &key.kid, &req.data, SignOptions::default())
-            .await
-            .map_err(|e| failed(&key.kid, "sign", e))?;
+        let token = match self.token(what.clone()).await {
+            Ok(t) => t,
+            Err(e) => {
+                self.record(&what, outcome(&e)).await;
+                return Err(failed(&key.kid, "token", e));
+            }
+        };
+        let sig = match self.hem.exdsa_sign(&token, &key.kid, &req.data, SignOptions::default()).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.record(&what, "failed").await;
+                return Err(failed(&key.kid, "sign", e));
+            }
+        };
         log::info!("sign: {} done, {} bytes", key.kid, req.data.len());
+        self.record(&what, "signed").await;
         Signature::new(Algorithm::Ed25519, sig).map_err(AgentError::other)
     }
 
@@ -260,6 +421,16 @@ impl Session for HemAgent {
 
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// `Last::result` for a token that could not be had.
+fn outcome(e: &HemError) -> &'static str {
+    match e.code.as_str() {
+        "denied" => "denied",
+        "timeout" => "timeout",
+        "auth_password_required" => "locked",
+        _ => "failed",
+    }
 }
 
 fn failed(kid: &str, step: &str, e: HemError) -> AgentError {

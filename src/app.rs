@@ -57,6 +57,9 @@ enum Cmd {
         /// Named pipe (Windows) or socket path; overrides `listen` in the file.
         #[arg(long)]
         listen: Option<String>,
+        /// The GUI's control channel (pipe / socket); overrides `control` in the file.
+        #[arg(long)]
+        control: Option<String>,
         /// Log to this file instead of the terminal [background default:
         /// %LOCALAPPDATA%\hem-ssh-agent\agent.log].
         #[arg(long)]
@@ -127,9 +130,9 @@ async fn dispatch(cli: Cli, background: bool) -> Res<()> {
     match cli.cmd {
         Cmd::Keys { url } => keys(load_config(cli.config, false)?, url).await,
         Cmd::Pubkey { url, kid } => pubkey(load_config(cli.config, false)?, url, kid).await,
-        Cmd::Run { login, listen, .. } => {
+        Cmd::Run { login, listen, control, .. } => {
             let cfg = load_config(cli.config, true)?.expect("required");
-            run(cfg, login && !background, listen).await
+            run(cfg, login && !background, listen, control).await
         }
         Cmd::Install { start } => install(cli.config, start),
         Cmd::Uninstall => uninstall(),
@@ -246,14 +249,19 @@ fn agent_keys(cfg: &Config) -> Res<Vec<crate::AgentKey>> {
     Ok(keys)
 }
 
-async fn run(cfg: Config, login: bool, listen_flag: Option<String>) -> Res<()> {
+async fn run(cfg: Config, login: bool, listen_flag: Option<String>, control_flag: Option<String>) -> Res<()> {
     let keys = agent_keys(&cfg)?;
     let address = match listen_flag.or(cfg.listen.clone()) {
         Some(a) => a,
         None => listen::default_address()?,
     };
-    // Take the address first: nothing asked if another agent holds it.
+    let control_address = match control_flag.or(cfg.control.clone()) {
+        Some(a) => a,
+        None => listen::default_control_address()?,
+    };
+    // Take the addresses first: nothing asked if another agent holds them.
     let listener = listen::bind(&address).await?;
+    let control_listener = listen::bind(&control_address).await?;
 
     let hem = Arc::new(Hem::new(&cfg.url, HemOptions::default())?);
     let auth = match cfg.auth {
@@ -262,7 +270,7 @@ async fn run(cfg: Config, login: bool, listen_flag: Option<String>) -> Res<()> {
             Auth::Remote { uv: uv(cfg.uv), timeout: std::time::Duration::from_secs(cfg.approve_timeout.into()) }
         }
     };
-    let agent = HemAgent::new(hem, keys, auth.clone());
+    let agent = HemAgent::new(hem, keys, auth.clone()).with_url(&cfg.url);
     log::info!("hem-ssh-agent {} for {}", env!("CARGO_PKG_VERSION"), cfg.url);
     for k in agent.keys() {
         log::info!("key {}: {}", k.kid, k.openssh());
@@ -279,15 +287,20 @@ async fn run(cfg: Config, login: bool, listen_flag: Option<String>) -> Res<()> {
         ),
     }
     log::info!("listening on {address}");
+    log::info!("control channel on {control_address}");
     #[cfg(unix)]
     eprintln!("export SSH_AUTH_SOCK={address}");
 
     tokio::select! {
-        r = listen::serve(listener, agent) => r?,
+        r = listen::serve(listener, agent.clone()) => r?,
+        r = crate::control::serve(control_listener, agent) => r?,
         _ = tokio::signal::ctrl_c() => log::info!("stopping"),
     }
     #[cfg(unix)]
-    let _ = std::fs::remove_file(&address);
+    {
+        let _ = std::fs::remove_file(&address);
+        let _ = std::fs::remove_file(&control_address);
+    }
     Ok(())
 }
 
