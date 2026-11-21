@@ -74,6 +74,12 @@ Two ways to get one, both from hem-sdk-rust:
 
 One token can carry up to 8 scopes, so all configured keys share one token.
 
+Tokens are short-lived on purpose (`run --ttl`, default 300 s). Prototype
+(v0.1): the password is asked once at `run`, the derived key is kept
+(`AuthOptions::remember`), and a new token is minted on the first sign after
+expiry, without asking again. Whether a session should instead end with the
+token (ask again: terminal, `ssh-add -X` unlock, or the phone) is open.
+
 ## Configuration (planned)
 
 A TOML file in the platform config directory: HEM URL, keys (by kid or by a
@@ -89,21 +95,55 @@ come from the environment for tests.
   zeroized on drop.
 - Every signature is in the HEM audit log.
 
+## Code layout
+
+```
+src/agent.rs    HemAgent: the agent protocol answered from the HEM (no platform code)
+src/listen.rs   transports: Windows named pipe / unix socket (the only #[cfg] code)
+src/main.rs     CLI: keys, pubkey, run
+tests/live.rs   end to end through the real transport and an agent client (HEM_URL)
+```
+
+Agent protocol: `ssh-agent-lib` 0.6 (MIT/Apache-2.0; framing, messages,
+named pipe and unix socket listeners). Messages not implemented in
+`HemAgent` answer `FAILURE`, as the library does by default.
+
+## Windows findings (prototype, 2026-11-21)
+
+Tested against the HEM simulator with Windows OpenSSH 8.1p1 and Git for
+Windows 2.56 (bundled OpenSSH 10.5p1):
+
+- `ssh-add -L` / `-l` list the HEM key; `ssh.exe` logs in to a macOS sshd
+  with it; a sign after the token expired minted a new token silently.
+- `ssh-keygen -Y sign` (8.1) signs with the key from the agent; both 8.1 and
+  10.5 verify the SSHSIG.
+- Git commit signing works with
+  `gpg.format=ssh`, `user.signingkey=<file with the public key line>`,
+  `gpg.ssh.program=C:/Windows/System32/OpenSSH/ssh-keygen.exe`.
+  Verifying (`git log --show-signature`) needs a newer `ssh-keygen`: 8.1
+  rejects the `verify-time` option git passes; Git's bundled one works.
+- Git's bundled `ssh.exe` (msys) does not use the named pipe (it reads
+  `SSH_AUTH_SOCK`); for `git` over SSH set
+  `core.sshCommand=C:/Windows/System32/OpenSSH/ssh.exe`.
+- The Windows `ssh-agent` service must be stopped (it owns the same pipe);
+  `run` fails with a clear message when the pipe is taken.
+
 ## Plan
 
 1. Windows, development machine: CLI `pubkey` (authorized_keys line), then
    the agent on the OpenSSH named pipe `\\.\pipe\openssh-ssh-agent`; test with
-   Windows `ssh.exe`, `git push`, commit signing.
+   Windows `ssh.exe`, `git push`, commit signing. **Prototype done** (above);
+   `git push` to a real remote not tried yet.
 2. Pageant transport (plink, PuTTY, TortoiseGit).
 3. Linux: unix socket (`SSH_AUTH_SOCK`), then macOS.
 4. Phone approval, confirm-per-sign, config file, packaging (signed binaries).
 
 ## Open
 
-- Agent-protocol library: `ssh-agent-lib` (unix socket and Windows named pipe)
-  or a small own implementation of the four messages. To decide on the first
-  prototype.
 - How the background agent asks for the password: a terminal `login`
-  command talking to the running agent, or a prompt reused from onchato /
-  encedo-wg (decision 5).
-- Coexistence with a running OpenSSH agent service on Windows (same pipe name).
+  command talking to the running agent, `ssh-add -X` (agent unlock carries a
+  passphrase), or a prompt reused from onchato / encedo-wg (decision 5).
+- Token expiry: keep the derived key and refresh silently (prototype) or end
+  the session with the token and ask again (see Authorisation and tokens).
+- Named pipe access list: the prototype uses the tokio default (remote
+  clients refused, default DACL); restrict it to the current user.

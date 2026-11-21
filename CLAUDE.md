@@ -26,7 +26,8 @@ Instructions for AI agents working in this repository. Design decisions:
 ```bash
 git submodule update --init
 cargo build
-cargo test
+cargo test                                   # offline
+HEM_URL=https://ssh-agent-tester.playground.ence.do HEM_PASSWORD=... cargo test --test live
 cargo clippy --all-targets -- -D warnings
 ```
 
@@ -36,7 +37,9 @@ Windows (GNU toolchain): `~/.cargo/bin` and `C:\mingw64\bin` must be on PATH.
 
 `https://ssh-agent-tester.playground.ence.do` - a HEM simulator for this
 project. Not a secret; it is here temporarily. Initialised as hem-api-tester
-T-2 does: the user passphrase is the tester's (`config.php`).
+T-2 does: the user passphrase is the tester's (`config.php`). The live test
+key (description `hem-ssh-agent-test`, label "hem-ssh-agent live test") is
+created on the first run and reused.
 
 Test machines: Windows (the development machine), Linux in a VM on macOS,
 macOS.
