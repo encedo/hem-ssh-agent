@@ -1,0 +1,3 @@
+[submodule "hem-sdk-rust"]
+	path = hem-sdk-rust
+	url = https://github.com/encedo/hem-sdk-rust.git
