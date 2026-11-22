@@ -111,9 +111,19 @@ jobs:
           # pwd -W: D:/a/... - a path the Go toolchain, a Windows program, reads.
           bin="$(cd "$work/x/llvm-mingw-$ver-ucrt-aarch64/bin" && pwd -W)"
           "$bin/aarch64-w64-mingw32-gcc.exe" --version | head -1
+          # CC is Go's; the agent's C (ring) is built by cc-rs, which reads CC
+          # too, unless CC_<target> is set - and llvm-mingw has no MSVC headers
+          # (`'assert.h' file not found`). ring wants clang on Windows ARM64:
+          # the image's LLVM, which finds Visual Studio's headers and the SDK.
+          # By name, on PATH: cc-rs splits a CC value at spaces.
+          llvm="C:/Program Files/LLVM/bin"
+          "$llvm/clang.exe" --version | head -1
+          echo "$llvm" >> "$GITHUB_PATH"
           {
             echo "CC=$bin/aarch64-w64-mingw32-gcc.exe"
             echo "CXX=$bin/aarch64-w64-mingw32-g++.exe"
+            echo "CC_aarch64_pc_windows_msvc=clang"
+            echo "CXX_aarch64_pc_windows_msvc=clang++"
           } >> "$GITHUB_ENV"
 
       # Once, on Linux: a Windows checkout may carry CRLF, which gofmt reports.

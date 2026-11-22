@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Builds the Windows bundle (Git Bash; cargo, go and a MinGW C compiler for the
-# window's cgo - gcc on PATH, or CC: on arm64 an aarch64 one, e.g. llvm-mingw):
+# window's cgo - gcc on PATH, or CC: on arm64 an aarch64 one, e.g. llvm-mingw,
+# and then CC_aarch64_pc_windows_msvc=clang (LLVM) for the agent's ring, or
+# cc-rs takes CC too):
 # dist/hem-ssh-agent-<version>-windows-<amd64|arm64>.zip with the agent, its
 # background twin, the window, the icon and install.ps1 / uninstall.ps1.
 #
