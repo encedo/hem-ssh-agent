@@ -41,6 +41,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    # install --start: our std handles not inherited by the window (src/app.rs).
+    "Win32_System_Console",
 ] }
 
 # The owner check of ~/.hem-ssh-agent (src/listen.rs); tokio already uses it.

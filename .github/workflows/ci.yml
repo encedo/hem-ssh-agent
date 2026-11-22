@@ -1,0 +1,48 @@
+name: CI
+
+# Every push to any branch, every pull request, or by hand: test and build on
+# Linux, macOS and Windows (build.yml). The bundles are uploaded too, for now:
+# while the agent is an experiment every push is a test build somebody
+# installs (artifacts kept 7 days). Tags and releases are not set up yet.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A new push supersedes the run in flight for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Plain ASCII in the scripts and the files shipped as text: a Windows
+  # console and PowerShell 5.1 (install.ps1) read them in the ANSI code page.
+  # Rust and Go sources are UTF-8 by definition (the phone's note uses a
+  # middle dot on purpose).
+  ascii:
+    name: plain ASCII
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Everything must be plain ASCII
+        run: |
+          bad=""
+          for f in $(git ls-files '*.sh' '*.ps1' '*.yml' '*.txt' '*.desktop' '*.in'); do
+            if [ -n "$(LC_ALL=C tr -d '\11\15\40-\176' < "$f")" ]; then
+              bad="$bad $f"
+            fi
+          done
+          if [ -n "$bad" ]; then
+            echo "Not plain ASCII:$bad"; exit 1
+          fi
+
+  build:
+    name: build
+    uses: ./.github/workflows/build.yml
+    with:
+      package: true

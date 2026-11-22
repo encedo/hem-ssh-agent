@@ -38,7 +38,20 @@ cp "$here/icon.ico" "$here/install.ps1" "$here/uninstall.ps1" "$stage/"
 cp "$root/LICENSE" "$stage/LICENSE.txt"
 sed "s/@BUILD@/$build/" "$here/README.txt" > "$stage/README.txt"
 
-rm -f "$root/target/dist/$name.zip"
-powershell.exe -NoProfile -Command \
-	"Compress-Archive -Path '$(cygpath -w "$stage")' -DestinationPath '$(cygpath -w "$root/target/dist/$name.zip")'"
-echo "==> target/dist/$name.zip"
+zip_dir() { # zip_dir <stage dir> <zip>
+	rm -f "$2"
+	powershell.exe -NoProfile -Command \
+		"Compress-Archive -Path '$(cygpath -w "$1")' -DestinationPath '$(cygpath -w "$2")'"
+	echo "==> ${2#"$root"/}"
+}
+zip_dir "$stage" "$root/target/dist/$name.zip"
+
+# The command line alone: the agent and its background twin, no window.
+cli="hem-ssh-agent-cli-$version-windows-amd64"
+cstage="$root/target/dist/$cli"
+rm -rf "$cstage"
+mkdir -p "$cstage"
+cp "$root/target/release/hem-ssh-agent.exe" "$root/target/release/hem-ssh-agentw.exe" "$cstage/"
+cp "$root/LICENSE" "$cstage/LICENSE.txt"
+cp "$root/README.md" "$cstage/"
+zip_dir "$cstage" "$root/target/dist/$cli.zip"

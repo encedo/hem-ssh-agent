@@ -54,3 +54,11 @@ cp "$here/install.sh" "$here/uninstall.sh" "$root/README.md" "$root/LICENSE" "$s
 rm -f "$root/target/dist/$name.zip"
 (cd "$root/target/dist" && ditto -c -k --keepParent "$name" "$name.zip")
 echo "==> target/dist/$name.zip"
+
+# The command line alone, no window.
+cli="hem-ssh-agent-cli-$version-macos-$arch"
+rm -rf "$root/target/dist/$cli"
+mkdir -p "$root/target/dist/$cli"
+cp "$root/target/release/hem-ssh-agent" "$root/README.md" "$root/LICENSE" "$root/target/dist/$cli/"
+tar -C "$root/target/dist" -czf "$root/target/dist/$cli.tar.gz" "$cli"
+echo "==> target/dist/$cli.tar.gz"

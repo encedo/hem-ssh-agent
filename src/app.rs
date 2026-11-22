@@ -365,7 +365,18 @@ fn install(config_flag: Option<PathBuf>, start: bool, no_gui: bool) -> Res<()> {
     warn_openssh_service();
 
     if start {
-        Command::new(&exe).args(&args).spawn()?;
+        // Nothing of ours goes to the child: a caller reading this program's
+        // output (PowerShell, a pipe) would otherwise wait until the window
+        // exits. Null stdio is not enough - CreateProcess also hands over
+        // every inheritable handle, our own std handles included.
+        use std::process::Stdio;
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+        for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // Safety: our own std handles; a null or invalid one is just not changed.
+            unsafe { SetHandleInformation(GetStdHandle(which), HANDLE_FLAG_INHERIT, 0) };
+        }
+        Command::new(&exe).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
         if use_gui {
             println!("started: the tray icon; it starts the agent");
         } else {

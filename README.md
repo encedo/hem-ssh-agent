@@ -11,8 +11,11 @@ See [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Install
 
-Bundles are built per platform by `gui/<platform>/build.sh` (the agent, the
-tray window, installers); each installs for the current user, no
+Bundles are built per platform by `gui/<platform>/build.sh` - and by GitHub
+Actions on every push (`.github/workflows`, artifacts
+`hem-ssh-agent-<os>-<arch>`, kept 7 days): `hem-ssh-agent-<version>-<os>-<arch>`
+(the agent, the tray window, installers) and `hem-ssh-agent-cli-...` (the
+command line alone). Unsigned for now. Each installs for the current user, no
 administrator / root, and starts the window at logon - the window starts
 the agent:
 

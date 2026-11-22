@@ -1,0 +1,122 @@
+name: Build
+
+# Every platform the agent ships to - Linux, macOS, Windows - built the same
+# way: test, then the platform's own gui/<platform>/build.sh, the script a
+# developer runs, so CI builds what a person would. One cell per platform,
+# because the window links a GUI toolkit through cgo and cgo builds for the
+# machine it runs on; the agent (Rust) is built in the same cell, so both
+# halves carry one stamp (<version>+<commit>) and accept each other.
+#
+# Each cell leaves, under the artifact hem-ssh-agent-<os>-<arch>:
+#
+#   hem-ssh-agent-<version>-<os>-<arch>.zip|.tar.gz       agent + window + installer
+#   hem-ssh-agent-cli-<version>-<os>-<arch>.zip|.tar.gz   the command line alone
+#
+# Not run on its own: ci.yml calls it on every push.
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: Also build the bundles and upload them.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,   arch: amd64, runner: ubuntu-24.04 }
+          - { os: macos,   arch: arm64, runner: macos-latest }
+          - { os: windows, arch: amd64, runner: windows-latest }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # hem-sdk-rust and gui/hem-sdk-go are submodules (public).
+          submodules: recursive
+          # The whole history: the bundle scripts stamp the build with the
+          # commit.
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: gui/go.mod
+          cache-dependency-path: gui/go.sum
+
+      # Fyne is cgo, and GLFW compiles an X11 and a Wayland backend into the
+      # same binary: headers for both (list from encedo-wg-hsm's build).
+      - name: Linux build dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc pkg-config \
+            libgl1-mesa-dev xorg-dev libxxf86vm-dev \
+            libwayland-dev libxkbcommon-dev wayland-protocols
+
+      # Once, on Linux: a Windows checkout may carry CRLF, which gofmt reports.
+      # Only gui/*.go - gui/hem-sdk-go is another repository.
+      - name: gofmt (window)
+        if: matrix.os == 'linux'
+        working-directory: gui
+        run: |
+          unformatted="$(gofmt -l *.go)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Clippy
+        shell: bash
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      # Offline: the live tests skip without HEM_URL / HEM_PASSWORD.
+      - name: Test (agent)
+        shell: bash
+        run: cargo test --locked
+
+      - name: Vet and test (window)
+        working-directory: gui
+        shell: bash
+        run: |
+          go vet -tags migrated_fynedo .
+          go test -tags migrated_fynedo .
+
+      - name: Bundles
+        if: inputs.package
+        shell: bash
+        run: |
+          set -eu
+          case "${{ matrix.os }}" in
+            linux)   sh gui/linux/build.sh ;;
+            macos)   sh gui/macos/build.sh ;;
+            windows) bash gui/windows/build.sh ;;
+          esac
+          ls -l target/dist
+
+      - name: Upload
+        if: inputs.package
+        uses: actions/upload-artifact@v7
+        with:
+          name: hem-ssh-agent-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            target/dist/*.zip
+            target/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
