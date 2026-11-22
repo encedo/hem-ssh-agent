@@ -10,10 +10,11 @@ name: Build
 # in the arm64 cell. The agent (Rust) is built in the same cell, so both halves
 # carry one stamp (<version>+<commit>) and accept each other.
 #
-# Each cell leaves, under the artifact hem-ssh-agent-<os>-<arch>:
+# Each cell builds two bundles; the artifacts job gathers them into two
+# artifacts for the run:
 #
-#   hem-ssh-agent-<version>-<os>-<arch>.zip|.tar.gz       agent + window + installer
-#   hem-ssh-agent-cli-<version>-<os>-<arch>.zip|.tar.gz   the command line alone
+#   hem-ssh-agent-gui: hem-ssh-agent-<version>-<os>-<arch>.zip|.tar.gz      agent + window + installer
+#   hem-ssh-agent-cli: hem-ssh-agent-cli-<version>-<os>-<arch>.zip|.tar.gz  the command line alone
 #
 # Not run on its own: ci.yml calls it on every push.
 on:
@@ -157,13 +158,52 @@ jobs:
           esac
           ls -l target/dist
 
-      - name: Upload
+      # Per cell, for the merge job below; deleted once merged.
+      - name: Upload (agent + window)
         if: inputs.package
         uses: actions/upload-artifact@v7
         with:
-          name: hem-ssh-agent-${{ matrix.os }}-${{ matrix.arch }}
+          name: part-gui-${{ matrix.os }}-${{ matrix.arch }}
           path: |
             target/dist/*.zip
             target/dist/*.tar.gz
+            !target/dist/hem-ssh-agent-cli-*
           if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload (command line)
+        if: inputs.package
+        uses: actions/upload-artifact@v7
+        with:
+          name: part-cli-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            target/dist/hem-ssh-agent-cli-*.zip
+            target/dist/hem-ssh-agent-cli-*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # Two artifacts for the whole run, whatever cells built: hem-ssh-agent-gui
+  # (agent + window + installer, every platform) and hem-ssh-agent-cli (the
+  # command line alone, every platform). Runs when a cell failed too, so the
+  # others' bundles are still there to test.
+  artifacts:
+    name: artifacts
+    needs: build
+    if: ${{ !cancelled() && inputs.package }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: hem-ssh-agent-gui
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: hem-ssh-agent-gui
+          pattern: part-gui-*
+          delete-merged: true
+          retention-days: 7
+
+      - name: hem-ssh-agent-cli
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: hem-ssh-agent-cli
+          pattern: part-cli-*
+          delete-merged: true
           retention-days: 7
