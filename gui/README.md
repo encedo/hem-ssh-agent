@@ -28,8 +28,11 @@ Flags: `-control`, `-config`, `-no-start`, `-theme auto|dark|light`, `-version`.
 ## Build
 
 Needs Go (1.26.5 or later) and a C compiler for cgo (Fyne uses OpenGL):
-on Windows the MinGW-w64 gcc; Linux also the GL/X11 headers
-(`libgl1-mesa-dev xorg-dev`). `-tags migrated_fynedo` tells Fyne every UI
+on Windows the MinGW-w64 gcc; Linux also the GL, X11 and Wayland headers -
+GLFW builds both backends into one binary and picks one at run time
+(Debian/Ubuntu: `libgl1-mesa-dev xorg-dev libxxf86vm-dev libwayland-dev
+libxkbcommon-dev wayland-protocols`, the list CI installs; without the
+Wayland ones: `wayland-client-core.h: No such file`). `-tags migrated_fynedo` tells Fyne every UI
 call from another goroutine goes through `fyne.Do` (`FyneApp.toml` says the
 same to `fyne package`).
 

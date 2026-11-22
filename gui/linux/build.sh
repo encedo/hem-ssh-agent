@@ -1,8 +1,9 @@
 #!/bin/sh
 # Builds the Linux bundle: target/dist/hem-ssh-agent-<version>-linux-<amd64|arm64>.tar.gz
 # with both programs, the menu entry, the icon and install.sh / uninstall.sh.
-# Needs cargo, go, gcc and the GL/X11 headers Fyne builds against
-# (Debian/Ubuntu: libgl1-mesa-dev xorg-dev).
+# Needs cargo, go, gcc and the GL, X11 and Wayland headers Fyne's GLFW builds
+# both its backends against (Debian/Ubuntu: libgl1-mesa-dev xorg-dev
+# libxxf86vm-dev libwayland-dev libxkbcommon-dev wayland-protocols - as CI).
 #
 # Both halves are stamped with the same build (<version>+<commit>): the agent
 # refuses a token from a window of another build (src/control.rs).
