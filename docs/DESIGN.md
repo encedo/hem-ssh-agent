@@ -78,6 +78,23 @@ Two ways to get one, both from hem-sdk-rust:
   agent waits `approve_timeout` seconds (default 90; hem-sdk-js 60 s was
   too short in tests - approvals took 20-44 s and two ran out); sshd's
   default `LoginGraceTime` is 120 s.
+- **Phone first, password as the fallback** (`auth = "remote+password"`,
+  decided 2026-11-22): a sign without a valid token asks the phone, as
+  `remote`. With no phone at hand, *Use password* in the tray menu (shown
+  while the phone is asked; control op `use_password`) stops the wait at
+  once - the request is dropped and hem-sdk-rust withdraws it on the broker
+  (`DELETE /notify/event/{id}`), so the phone stops showing it and a late
+  answer changes nothing - and opens the Unlock window. The waiting signs
+  are held, not failed: they take the token the window hands over, up to
+  `approve_timeout` from the click, so `ssh` / `git commit` finish without
+  a retry; Lock or closing the window ends them unsigned at once. A token
+  handed over while the phone is asked (the window's *Unlock...* or
+  `ssh-add -X`) ends the phone wait the same way. Password tokens live
+  `ttl`, phone tokens the phone's lifetime; after a password token expires
+  the phone is asked again, unless *Remember the password until Lock* is on
+  (the window keeps renewing) or `ssh-add -X` / `run --login` gave the agent
+  the derived key (until Lock). Keys are listed without a token, as in
+  `remote`.
 
 The note is read from the data to sign, nothing invented (`src/note.rs`):
 an SSH user-auth request (RFC 4252 section 7) gives
@@ -113,11 +130,14 @@ overrides it. The framing and message shape are encedo-wg-hsm
 | `{"op":"watch"}` | `reply`, then an `event` snapshot now and on every change |
 | `{"op":"token","build":{...},"token":"..."}` | `reply` ok, or `kind` `build` / `invalid_arg` / a hem-sdk code |
 | `{"op":"lock"}` | `reply`; drops the token and the derived key |
+| `{"op":"use_password"}` | `reply`; `remote+password`: stops asking the phone, the waiting signs take the next token |
 
 The snapshot (`Status`): `state` (`locked` / `ready` / `waiting` for the
-phone), `auth`, `url` (the HEM the window logs in to), `ttl` (password
-mode: the lifetime to ask for), `keys` (kid, comment), `expires_at` (unix seconds, read from
-the token), `pending` (the note on the phone and since when), `last` (the
+phone or the password), `auth` (`password` / `remote` / `remote+password`),
+`url` (the HEM the window logs in to), `ttl` (when the password may be used:
+the lifetime to ask for), `keys` (kid, comment), `expires_at` (unix seconds, read from
+the token), `pending` (the note on the phone, since when, and `password`
+once *Use password* was chosen), `last` (the
 last sign's note, `signed` / `denied` / `timeout` / `locked` / `failed`, and
 when). A whole snapshot every time, never a delta.
 

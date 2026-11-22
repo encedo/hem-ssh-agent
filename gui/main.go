@@ -171,7 +171,7 @@ func (u *ui) build(tray bool) {
 		container.NewGridWithColumns(2, u.lockBtn, u.unlock)))
 	u.win.Resize(fyne.NewSize(400, 0))
 	if tray {
-		u.win.SetCloseIntercept(u.win.Hide)
+		u.win.SetCloseIntercept(u.closeWindow)
 	} else {
 		u.win.SetMaster()
 	}
@@ -279,9 +279,13 @@ func (u *ui) apply(s Status) {
 	if had {
 		switch {
 		case s.Pending != nil && (prev.Pending == nil || prev.Pending.Since != s.Pending.Since):
-			u.notify("Approve on your phone", s.Pending.Note)
+			if s.Auth == "remote+password" {
+				u.notify("Approve on your phone", s.Pending.Note+"\nNo phone at hand: Use password in the tray menu.")
+			} else {
+				u.notify("Approve on your phone", s.Pending.Note)
+			}
 		case s.Last != nil && (prev.Last == nil || *prev.Last != *s.Last):
-			u.notifyResult(*s.Last, prev.Pending != nil)
+			u.notifyResult(*s.Last, prev.Pending)
 		case prev.State != "locked" && s.State == "locked" && s.Auth == "password" && !remembering:
 			u.notify("Locked", "The token has expired or the agent was locked. Unlock to sign again.")
 		}
@@ -299,17 +303,17 @@ func (u *ui) keepUp(prev Status, had bool, s Status) bool {
 	if !u.remembering() {
 		return false
 	}
-	if s.Auth != "password" {
+	if !passwordAllowed(s) {
 		u.forget()
 		return false
 	}
-	switch s.State {
-	case "ready":
-		if s.ExpiresAt > 0 {
-			u.scheduleRenew(s.ExpiresAt - renewMargin(s.TTL))
-		}
-	case "locked":
-		if had && prev.State == "ready" && prev.ExpiresAt > 0 && time.Now().Unix() < prev.ExpiresAt-5 {
+	// No token: "locked" in password mode; with the phone first the state
+	// stays "ready" (or "waiting": the phone is being asked) without one.
+	switch {
+	case s.ExpiresAt > 0 && s.State != "locked":
+		u.scheduleRenew(s.ExpiresAt - renewMargin(s.TTL))
+	case s.State == "locked" || s.Auth == "remote+password":
+		if had && prev.ExpiresAt > 0 && time.Now().Unix() < prev.ExpiresAt-5 {
 			u.forget()
 			u.notify("Locked", "The agent was locked; the remembered password is forgotten. Unlock to sign again.")
 			return false
@@ -396,19 +400,21 @@ func (u *ui) forget() {
 	}
 }
 
-func (u *ui) notifyResult(l Last, afterPhone bool) {
+func (u *ui) notifyResult(l Last, waited *Pending) {
 	// Failures always; a success only when the phone was asked, so a git
 	// fetch with a live token does not raise a notification.
-	switch l.Result {
-	case "signed":
-		if afterPhone {
+	switch {
+	case l.Result == "signed":
+		if waited != nil && !waited.Password {
 			u.notify("Approved", l.Note)
 		}
-	case "denied":
+	case l.Result == "denied":
 		u.notify("Refused on the phone", l.Note)
-	case "timeout":
+	case l.Result == "timeout" && waited != nil && waited.Password:
+		u.notify("No password given in time", l.Note)
+	case l.Result == "timeout":
 		u.notify("No answer from the phone", l.Note)
-	case "locked":
+	case l.Result == "locked":
 		u.notify("Locked - not signed", l.Note+"\nUnlock from the tray icon.")
 	default:
 		u.notify("Not signed", l.Note)
@@ -435,6 +441,8 @@ func (u *ui) stateLine() string {
 		return "Agent: " + down
 	case !seen:
 		return "Agent: connecting..."
+	case s.State == "waiting" && s.Pending != nil && s.Pending.Password:
+		return "Waiting for the password"
 	case s.State == "waiting":
 		return "Waiting for the phone"
 	case s.State == "locked":
@@ -443,7 +451,7 @@ func (u *ui) stateLine() string {
 		return "Ready - the password is remembered"
 	case s.ExpiresAt > 0:
 		return "Ready until " + time.Unix(s.ExpiresAt, 0).Format("15:04")
-	case s.Auth == "remote":
+	case s.Auth == "remote" || s.Auth == "remote+password":
 		return "Ready - the phone approves"
 	default:
 		return "Ready"
@@ -461,9 +469,13 @@ func (u *ui) renderMenu() {
 	if down != "" && u.agentArgs != nil {
 		items = append(items, fyne.NewMenuItem("Start the agent", u.onStartAgent))
 	}
+	if seen && s.Auth == "remote+password" && s.Pending != nil && !s.Pending.Password {
+		// No phone at hand: stop asking it, unlock with the password instead.
+		items = append(items, fyne.NewMenuItem("Use password", u.onUsePassword))
+	}
 	unlock := fyne.NewMenuItem("Unlock...", u.present)
 	// Like Lock, only when it does something: not while unlocked.
-	unlock.Disabled = !seen || s.Auth != "password" || s.State == "ready"
+	unlock.Disabled = !seen || !canUnlock(s)
 	lock := fyne.NewMenuItem("Lock", u.onLock)
 	lock.Disabled = !seen || (s.State == "locked" && !u.remembering())
 	items = append(items, unlock, lock, fyne.NewMenuItem("Show log", u.onLog))
@@ -484,7 +496,7 @@ func (u *ui) renderWindow() {
 		text += "\n• " + k.Comment
 	}
 	u.info.SetText(text)
-	if seen && s.Auth == "password" && s.State != "ready" {
+	if seen && canUnlock(s) {
 		u.unlock.Enable()
 		u.pass.Enable()
 		u.remember.Enable()
@@ -502,7 +514,7 @@ func (u *ui) renderWindow() {
 
 func (u *ui) onUnlock() {
 	s, seen, _ := u.snapshot()
-	if !seen || s.Auth != "password" || u.pass.Text == "" {
+	if !seen || !passwordAllowed(s) || u.pass.Text == "" {
 		return
 	}
 	pass := []byte(u.pass.Text)
@@ -591,6 +603,31 @@ func (u *ui) handOverToken(c *hem.Client, s Status, pass []byte) (time.Time, err
 		return time.Time{}, fmt.Errorf("the agent refused the token: %s", r.Err)
 	}
 	return hem.TokenExpiry(tok), nil
+}
+
+// onUsePassword: the phone is not at hand. The agent stops asking it (the
+// request is withdrawn) and the waiting sign takes the token this window
+// hands over after Unlock.
+func (u *ui) onUsePassword() {
+	u.present()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		r, err := ask(ctx, u.control, Request{Op: "use_password"})
+		if err != nil || !r.OK {
+			u.do(func() { u.notify("The phone is still asked", fmt.Sprint(err, r.Err)) })
+		}
+	}()
+}
+
+// closeWindow: hidden, not closed (the tray keeps the application). Closed
+// while a sign waits for the password: that sign ends unsigned at once, as
+// with Lock, instead of waiting out its time.
+func (u *ui) closeWindow() {
+	u.win.Hide()
+	if s, seen, _ := u.snapshot(); seen && s.Pending != nil && s.Pending.Password {
+		u.onLock()
+	}
 }
 
 // onLock locks the agent and forgets a remembered password.

@@ -46,7 +46,7 @@ type Reply struct {
 // Status is the agent's whole state, sent on every change.
 type Status struct {
 	State     string    `json:"state"` // locked | ready | waiting
-	Auth      string    `json:"auth"`  // password | remote
+	Auth      string    `json:"auth"`  // password | remote | remote+password
 	URL       string    `json:"url,omitempty"`
 	TTL       int       `json:"ttl,omitempty"`
 	Keys      []KeyInfo `json:"keys"`
@@ -63,6 +63,27 @@ type KeyInfo struct {
 type Pending struct {
 	Note  string `json:"note"`
 	Since int64  `json:"since"`
+	// Use password was chosen: the phone is no longer asked, the sign waits
+	// for this window's token.
+	Password bool `json:"password,omitempty"`
+}
+
+// passwordAllowed: the HEM password unlocks (password mode, or remote mode
+// with the password as the fallback).
+func passwordAllowed(s Status) bool {
+	return s.Auth == "password" || s.Auth == "remote+password"
+}
+
+// canUnlock: Unlock... does something now - password mode while locked; with
+// the phone first, while there is no token (the phone would be asked).
+func canUnlock(s Status) bool {
+	switch s.Auth {
+	case "password":
+		return s.State != "ready"
+	case "remote+password":
+		return s.ExpiresAt == 0
+	}
+	return false
 }
 
 type Last struct {

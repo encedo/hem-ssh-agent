@@ -249,7 +249,7 @@ fn password() -> std::io::Result<Zeroizing<String>> {
 /// configuration says `auth = "remote"`.
 async fn cli_token(hem: &Hem, cfg: Option<&Config>, scope: Vec<String>, what: &str) -> Res<String> {
     match cfg {
-        Some(c) if c.auth == AuthMode::Remote => {
+        Some(c) if matches!(c.auth, AuthMode::Remote | AuthMode::RemotePassword) => {
             hem.hem_checkin().await?;
             eprintln!("approve on the phone: {what}");
             let opts = RemoteOptions {
@@ -314,11 +314,11 @@ async fn run(cfg: Config, login: bool, listen_flag: Option<String>, control_flag
     let control_listener = listen::bind(&control_address).await?;
 
     let hem = Arc::new(Hem::new(&cfg.url, HemOptions::default())?);
+    let timeout = std::time::Duration::from_secs(cfg.approve_timeout.into());
     let auth = match cfg.auth {
         AuthMode::Password => Auth::Password { ttl: cfg.ttl },
-        AuthMode::Remote => {
-            Auth::Remote { uv: uv(cfg.uv), timeout: std::time::Duration::from_secs(cfg.approve_timeout.into()) }
-        }
+        AuthMode::Remote => Auth::Remote { uv: uv(cfg.uv), timeout, password: None },
+        AuthMode::RemotePassword => Auth::Remote { uv: uv(cfg.uv), timeout, password: Some(cfg.ttl) },
     };
     let agent = HemAgent::new(hem, keys, auth.clone()).with_url(&cfg.url);
     log::info!("hem-ssh-agent {} for {}", env!("CARGO_PKG_VERSION"), cfg.url);
@@ -326,14 +326,15 @@ async fn run(cfg: Config, login: bool, listen_flag: Option<String>, control_flag
         log::info!("key {}: {}", k.kid, k.openssh());
     }
     match auth {
-        Auth::Password { ttl } if login => {
+        Auth::Password { ttl } | Auth::Remote { password: Some(ttl), .. } if login => {
             agent.unlock_with_password(&password()?).await?;
             log::info!("unlocked; token lifetime {ttl} s; `ssh-add -x` locks");
         }
         Auth::Password { .. } => log::info!("locked: `ssh-add -X` and the HEM password unlock"),
-        Auth::Remote { uv, timeout } => log::info!(
-            "remote: each new token is approved on the phone (uv {uv:?}, wait {} s)",
-            timeout.as_secs()
+        Auth::Remote { uv, timeout, password } => log::info!(
+            "remote: each new token is approved on the phone (uv {uv:?}, wait {} s){}",
+            timeout.as_secs(),
+            if password.is_some() { "; or the HEM password: Use password in the window, ssh-add -X" } else { "" }
         ),
     }
     log::info!("listening on {address}");

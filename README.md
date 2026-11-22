@@ -50,7 +50,9 @@ hem-ssh-agent pubkey --url https://my.ence.do --kid <kid> # line for config / au
 
 ```toml
 url  = "https://my.ence.do"
-auth = "remote"        # "password": unlock with `ssh-add -X`; "remote": approve on the phone
+auth = "remote"        # "password": unlock with `ssh-add -X`; "remote": approve on the phone;
+                       # "remote+password": the phone first, the password when it is not at hand
+                       # (Use password in the tray menu while the phone is asked, or ssh-add -X)
 uv   = "bio"           # remote: "bio" | "pin" | "none"
 ttl  = 300             # password: token lifetime, seconds
 approve_timeout = 90   # remote: seconds to wait for the phone

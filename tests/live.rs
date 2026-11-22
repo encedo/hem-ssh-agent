@@ -103,3 +103,64 @@ async fn agent_lists_and_signs() {
     #[cfg(unix)]
     let _ = std::fs::remove_file(&address);
 }
+
+/// `auth = "remote+password"`: the phone is asked first; "Use password" stops
+/// asking it (the request is withdrawn) and the waiting sign takes the token
+/// of the password unlock. Lock during that wait ends the sign unsigned.
+/// The paired phone gets two requests that are withdrawn within seconds, so
+/// this runs only with HEM_PHONE=1 as well.
+#[tokio::test]
+async fn phone_first_then_password() {
+    let (Ok(url), Ok(password), Ok(_)) =
+        (std::env::var("HEM_URL"), std::env::var("HEM_PASSWORD"), std::env::var("HEM_PHONE"))
+    else {
+        eprintln!("skipped: HEM_URL, HEM_PASSWORD and HEM_PHONE not set");
+        return;
+    };
+    let hem = Hem::new(&url, HemOptions::default()).unwrap();
+    let tok = hem.authorize_password(Some(&password), ["keymgmt:search"], AuthOptions::default()).await.unwrap();
+    let search = SearchOptions { key_type: Some("ED25519".into()), ..Default::default() };
+    let Some(found) = hem.search_keys_all(Some(&tok), TEST_DESCR, search).await.unwrap().into_iter().next() else {
+        eprintln!("skipped: no test key yet (agent_lists_and_signs creates it)");
+        return;
+    };
+    let tok = hem.authorize_password(None, key_scopes(&[&found.kid]), AuthOptions::default()).await.unwrap();
+    let key = load_key(&hem, &tok, &found.kid).await.unwrap();
+
+    let auth = Auth::Remote { uv: None, timeout: std::time::Duration::from_secs(60), password: Some(60) };
+    let agent = HemAgent::new(Arc::new(Hem::new(&url, HemOptions::default()).unwrap()), vec![key.clone()], auth);
+    let mut status = agent.subscribe();
+    assert_eq!(status.borrow().auth, "remote+password");
+    let req = SignRequest { credential: PublicCredential::Key(key.public.clone()), data: b"phone first".to_vec(), flags: 0 };
+
+    // 1. The phone is asked; Use password; the password unlock signs.
+    let mut signer = agent.clone();
+    let sign = tokio::spawn({
+        let req = req.clone();
+        async move { signer.sign(req).await }
+    });
+    status.wait_for(|s| s.pending.as_ref().is_some_and(|p| !p.password)).await.unwrap();
+    agent.use_password().await.unwrap();
+    status.wait_for(|s| s.pending.as_ref().is_some_and(|p| p.password)).await.unwrap();
+    agent.unlock_with_password(&password).await.unwrap();
+    let sig = sign.await.unwrap().expect("signed with the password's token");
+    assert_eq!(sig.algorithm(), Algorithm::Ed25519);
+    let s = status.borrow().clone();
+    assert_eq!((s.state.as_str(), s.pending, s.last.map(|l| l.result)), ("ready", None, Some("signed".into())));
+
+    // 2. Lock while waiting for the password: not signed, at once.
+    agent.lock().await;
+    let mut signer = agent.clone();
+    let sign = tokio::spawn({
+        let req = req.clone();
+        async move { signer.sign(req).await }
+    });
+    status.wait_for(|s| s.pending.as_ref().is_some_and(|p| !p.password)).await.unwrap();
+    agent.use_password().await.unwrap();
+    status.wait_for(|s| s.pending.as_ref().is_some_and(|p| p.password)).await.unwrap();
+    agent.lock().await;
+    let started = std::time::Instant::now();
+    assert!(sign.await.unwrap().is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(status.borrow().last.as_ref().map(|l| l.result.as_str()), Some("locked"));
+}

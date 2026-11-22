@@ -65,7 +65,7 @@ fn pageant_window_answers_as_putty_expects() {
         comment: "pageant test".into(),
     };
     // Remote mode is never locked: the key is listed without the HEM.
-    let agent = HemAgent::new(hem, vec![key], Auth::Remote { uv: None, timeout: std::time::Duration::from_secs(1) });
+    let agent = HemAgent::new(hem, vec![key], Auth::Remote { uv: None, timeout: std::time::Duration::from_secs(1), password: None });
     let window = format!("hem-ssh-agent-pageant-test-{}", std::process::id());
     assert!(!pageant::running(&window));
     let p = pageant::start_as(&window, agent, rt.handle().clone()).unwrap();

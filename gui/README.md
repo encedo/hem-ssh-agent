@@ -20,6 +20,11 @@ What it does:
   hands the agent only the token. By default the derived key is dropped at
   once; *Remember the password until Lock* keeps it in this window and hands
   over a fresh token before each expires, until Lock, `ssh-add -x` or Quit.
+- `auth = "remote+password"`: the phone first; while it is asked the tray
+  menu offers *Use password*, which stops asking the phone and opens the
+  Unlock window - the waiting `ssh` / `git` sign takes the token it hands
+  over; closing the window ends that sign unsigned. *Unlock...* also works
+  beforehand, while there is no token.
 - *Lock*, *Show log*, *Quit*. Without a tray (GNOME without an extension)
   the window stays open and closing it quits.
 

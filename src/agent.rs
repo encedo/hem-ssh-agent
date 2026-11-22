@@ -66,14 +66,31 @@ pub enum Auth {
     /// `ttl` seconds whenever the last one has expired.
     Password { ttl: u32 },
     /// The paired phone approves each token (lifetime = the phone's answer).
-    /// No password on this computer. `timeout`: how long to wait for the phone.
-    Remote { uv: Option<Uv>, timeout: std::time::Duration },
+    /// `timeout`: how long to wait for the phone. `password: Some(ttl)`
+    /// (`auth = "remote+password"`): the HEM password as the fallback - "Use
+    /// password" while the phone is asked stops asking it and waits up to
+    /// `timeout` for the window's token; `ssh-add -X` keeps the derived key
+    /// until Lock, as password mode does. `None`: no password on this computer.
+    Remote { uv: Option<Uv>, timeout: std::time::Duration, password: Option<u32> },
+}
+
+/// A token the phone wait ended with: from the phone (to be checked and
+/// stored), or one already stored meanwhile (the window's, `ssh-add -X`).
+enum Got {
+    Fresh(String),
+    Stored(String),
 }
 
 #[derive(Default)]
 struct State {
-    /// Password mode: the derived key is in `Hem`.
+    /// The derived key is in `Hem` (`ssh-add -X`, `run --login`).
     unlocked: bool,
+    /// "Use password" during a phone wait: the phone is no longer asked; the
+    /// waiting signs take the next token handed over, until this deadline
+    /// (unix seconds).
+    password_wait: Option<i64>,
+    /// Bumped by every Lock, so a wait started before it ends with it.
+    locks: u64,
     /// The last token and its `exp`: reused while valid, so a sign within the
     /// lifetime needs no check-in, no device login and no phone.
     token: Option<(String, i64)>,
@@ -98,8 +115,14 @@ pub struct HemAgent {
     keys: Arc<Vec<AgentKey>>,
     scopes: Arc<Vec<String>>,
     auth: Auth,
-    /// Also serialises getting a token, so parallel signs ask the phone once.
+    /// Held while a token is got, so parallel signs ask the phone once. The
+    /// state lock is never held across the phone wait: the window's token,
+    /// "Use password" and Lock must get through meanwhile.
+    fetch: Arc<tokio::sync::Mutex<()>>,
     state: Arc<tokio::sync::Mutex<State>>,
+    /// Bumped when a token is handed over, on "Use password" and on Lock:
+    /// wakes the waits to look at `state` again.
+    wake: watch::Sender<u64>,
     computer: Option<String>,
     /// The state as the control channel shows it (`watch`).
     status: watch::Sender<Status>,
@@ -126,7 +149,9 @@ impl HemAgent {
             keys: Arc::new(keys),
             scopes: Arc::new(scopes),
             auth,
+            fetch: Arc::default(),
             state: Arc::default(),
+            wake: watch::channel(0).0,
             computer: computer_name(),
             status,
             url: Arc::from(""),
@@ -156,6 +181,19 @@ impl HemAgent {
         matches!(self.auth, Auth::Password { .. })
     }
 
+    /// The token lifetime when the HEM password may be used: password mode,
+    /// or remote mode with the password as the fallback.
+    fn password_ttl(&self) -> Option<u32> {
+        match self.auth {
+            Auth::Password { ttl } => Some(ttl),
+            Auth::Remote { password, .. } => password,
+        }
+    }
+
+    fn wake_waits(&self) {
+        self.wake.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
     fn snapshot(&self, st: &State) -> Status {
         let state = if st.pending.is_some() {
             "waiting"
@@ -167,12 +205,14 @@ impl HemAgent {
         let now = now();
         Status {
             state: state.into(),
-            auth: if self.password_mode() { "password" } else { "remote" }.into(),
+            auth: match self.auth {
+                Auth::Password { .. } => "password",
+                Auth::Remote { password: None, .. } => "remote",
+                Auth::Remote { password: Some(_), .. } => "remote+password",
+            }
+            .into(),
             url: self.url.to_string(),
-            ttl: match self.auth {
-                Auth::Password { ttl } => Some(ttl),
-                Auth::Remote { .. } => None,
-            },
+            ttl: self.password_ttl(),
             keys: self.keys.iter().map(|k| KeyInfo { kid: k.kid.clone(), comment: k.comment.clone() }).collect(),
             expires_at: st.token.as_ref().map(|(_, exp)| *exp).filter(|exp| *exp > now),
             pending: st.pending.clone(),
@@ -232,13 +272,37 @@ impl HemAgent {
         st.token = Some((token.to_owned(), exp));
         self.publish(&st);
         drop(st);
+        self.wake_waits(); // a phone or password wait takes it
         self.publish_at_expiry(exp);
         Ok(exp)
     }
 
-    /// Password mode: log in to the HEM and keep the derived key.
+    /// The control channel's `use_password` ("Use password" in the window,
+    /// remote mode with the password as the fallback): a phone wait in
+    /// progress stops asking the phone - its request is withdrawn - and waits
+    /// up to `approve_timeout` from now for the window's token instead.
+    /// Nothing to do when the phone is not being asked.
+    pub async fn use_password(&self) -> hem_sdk::Result<()> {
+        let Auth::Remote { password: Some(_), timeout, .. } = self.auth else {
+            return Err(HemError::new("invalid_arg", "use_password: the password is not allowed (auth)"));
+        };
+        let mut st = self.state.lock().await;
+        let st = &mut *st;
+        if let Some(p) = st.pending.as_mut().filter(|p| !p.password) {
+            p.password = true;
+            st.password_wait = Some(now() + timeout.as_secs() as i64);
+            log::info!("the password instead of the phone: waiting {} s for it", timeout.as_secs());
+        }
+        self.publish(st);
+        self.wake_waits();
+        Ok(())
+    }
+
+    /// Log in to the HEM with the password and keep the derived key (password
+    /// mode; remote mode with the password as the fallback: until Lock, the
+    /// phone is not asked).
     pub async fn unlock_with_password(&self, password: &str) -> hem_sdk::Result<()> {
-        let Auth::Password { ttl } = self.auth else {
+        let Some(ttl) = self.password_ttl() else {
             return Err(HemError::new("invalid_arg", "unlock: the agent is in remote mode"));
         };
         let mut st = self.state.lock().await;
@@ -258,19 +322,26 @@ impl HemAgent {
         let exp = jwt_parse(&token).and_then(|p| p.get("exp").and_then(|e| e.as_i64())).unwrap_or(0);
         st.token = Some((token, exp));
         self.publish(&st);
+        drop(st);
+        self.wake_waits(); // a phone or password wait takes it
         log::info!("unlocked");
         Ok(())
     }
 
     /// Drop the derived key and every token: the next sign needs the password
-    /// (password mode) or a new approval on the phone (remote mode).
+    /// (password mode) or a new approval on the phone (remote mode). A phone
+    /// or password wait in progress ends unsigned.
     pub async fn lock(&self) {
         let mut st = self.state.lock().await;
         st.unlocked = false;
         st.token = None;
+        st.password_wait = None;
+        st.locks = st.locks.wrapping_add(1);
         self.hem.clear_keys();
         self.hem.clear_cache();
         self.publish(&st);
+        drop(st);
+        self.wake_waits();
         log::info!("locked");
     }
 
@@ -296,41 +367,114 @@ impl HemAgent {
     /// clock: required in remote mode (the broker is needed anyway), tried in
     /// password mode (a HEM behind an air gap still works without it).
     async fn token(&self, note: String) -> hem_sdk::Result<String> {
+        let _one = self.fetch.lock().await;
         let mut st = self.state.lock().await;
         if st.token_valid() {
             return Ok(st.token.as_ref().expect("valid").0.clone());
         }
         let token = match &self.auth {
-            Auth::Password { ttl } => {
-                if !st.unlocked {
-                    return Err(HemError::new("auth_password_required", "agent locked: ssh-add -X or the window"));
-                }
+            // The derived key is kept (ssh-add -X, run --login): password
+            // mode, or remote mode whose password was chosen until Lock.
+            Auth::Password { ttl } | Auth::Remote { password: Some(ttl), .. } if st.unlocked => {
                 if let Err(e) = self.hem.hem_checkin().await {
                     log::warn!("check-in failed, logging in without it: {} ({e})", e.code);
                 }
                 let opts = AuthOptions { exp_seconds: *ttl, remember: true, ctx: None };
                 self.hem.authorize_password(None, self.scopes.to_vec(), opts).await?
             }
-            Auth::Remote { uv, timeout } => {
-                st.pending = Some(Pending { note: note.clone(), since: now() });
-                self.publish(&st);
-                let approved = async {
-                    self.hem.hem_checkin().await?;
-                    let opts =
-                        RemoteOptions { require: *uv, note: Some(note), poll_timeout: *timeout, ..Default::default() };
-                    self.hem.authorize_remote(self.scopes.to_vec(), opts).await
-                }
-                .await;
+            Auth::Password { .. } => {
+                return Err(HemError::new("auth_password_required", "agent locked: ssh-add -X or the window"));
+            }
+            Auth::Remote { uv, timeout, .. } => {
+                let locks = st.locks;
+                drop(st); // the window's token, Use password and Lock get through meanwhile
+                let got = self.approve(note, *uv, *timeout, locks).await;
+                let mut st = self.state.lock().await;
                 st.pending = None; // published with the sign's result
-                approved?
+                st.password_wait = None;
+                match got? {
+                    Got::Stored(token) => return Ok(token),
+                    Got::Fresh(token) => {
+                        self.verify_keys(&mut st, &token).await?;
+                        return Ok(self.store(&mut st, token));
+                    }
+                }
             }
         };
         self.verify_keys(&mut st, &token).await?;
+        Ok(self.store(&mut st, token))
+    }
+
+    /// Keeps a new token for the signs to come.
+    fn store(&self, st: &mut State, token: String) -> String {
         let exp = jwt_parse(&token).and_then(|p| p.get("exp").and_then(|e| e.as_i64())).unwrap_or(0);
         st.token = Some((token.clone(), exp));
-        drop(st);
         self.publish_at_expiry(exp);
-        Ok(token)
+        token
+    }
+
+    /// Asks the phone, without the state lock. Ends early when a token is
+    /// handed over meanwhile (the window, ssh-add -X), on Lock, and on "Use
+    /// password" (the remote+password mode), which turns it into a wait for
+    /// the window's token. Every way out but the phone's own answer drops the
+    /// request, and the SDK withdraws it on the broker: the phone stops
+    /// showing it, and a late answer changes nothing.
+    async fn approve(&self, note: String, uv: Option<Uv>, timeout: std::time::Duration, locks: u64) -> hem_sdk::Result<Got> {
+        let mut wake = self.wake.subscribe();
+        {
+            let mut st = self.state.lock().await;
+            st.pending = Some(Pending { note: note.clone(), since: now(), password: false });
+            self.publish(&st);
+        }
+        let mut phone = Box::pin(async {
+            self.hem.hem_checkin().await?;
+            let opts = RemoteOptions { require: uv, note: Some(note), poll_timeout: timeout, ..Default::default() };
+            self.hem.authorize_remote(self.scopes.to_vec(), opts).await
+        });
+        loop {
+            tokio::select! {
+                r = &mut phone => return r.map(Got::Fresh),
+                _ = wake.changed() => {
+                    let st = self.state.lock().await;
+                    if st.locks != locks {
+                        return Err(HemError::new("auth_password_required", "locked while the phone was asked"));
+                    }
+                    if st.token_valid() {
+                        log::info!("a token was handed over: the phone is no longer asked");
+                        return Ok(Got::Stored(st.token.as_ref().expect("valid").0.clone()));
+                    }
+                    if st.password_wait.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        drop(phone); // withdrawn on the broker
+        self.wait_for_password(&mut wake, locks).await.map(Got::Stored)
+    }
+
+    /// After "Use password": the next token handed over (the window, or
+    /// ssh-add -X), until the deadline or a Lock.
+    async fn wait_for_password(&self, wake: &mut watch::Receiver<u64>, locks: u64) -> hem_sdk::Result<String> {
+        loop {
+            let left = {
+                let st = self.state.lock().await;
+                if st.locks != locks {
+                    return Err(HemError::new("auth_password_required", "locked while waiting for the password"));
+                }
+                if st.token_valid() {
+                    return Ok(st.token.as_ref().expect("valid").0.clone());
+                }
+                match st.password_wait {
+                    Some(deadline) if deadline > now() => (deadline - now()) as u64,
+                    _ => return Err(HemError::new("timeout", "no password given in time")),
+                }
+            };
+            tokio::select! {
+                _ = wake.changed() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(left)) => {}
+            }
+        }
     }
 
     /// Records how a sign ended, for the control channel.
@@ -406,16 +550,17 @@ impl Session for HemAgent {
         Ok(())
     }
 
-    /// `ssh-add -X`: the passphrase is the HEM password (password mode).
+    /// `ssh-add -X`: the passphrase is the HEM password (password mode, or
+    /// remote mode with the password as the fallback).
     async fn unlock(&mut self, passphrase: String) -> Result<(), AgentError> {
         let passphrase = Zeroizing::new(passphrase);
-        match self.auth {
-            Auth::Password { .. } => self.unlock_with_password(&passphrase).await.map_err(|e| {
-                log::warn!("unlock failed: {} ({e})", e.code);
-                AgentError::Failure
-            }),
-            Auth::Remote { .. } => Ok(()), // nothing to unlock: the phone approves
+        if self.password_ttl().is_none() {
+            return Ok(()); // nothing to unlock: the phone approves
         }
+        self.unlock_with_password(&passphrase).await.map_err(|e| {
+            log::warn!("unlock failed: {} ({e})", e.code);
+            AgentError::Failure
+        })
     }
 }
 

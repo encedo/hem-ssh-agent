@@ -6,7 +6,7 @@
 //!
 //! ```toml
 //! url  = "https://my.ence.do"
-//! auth = "remote"        # "password" (default) | "remote"
+//! auth = "remote"        # "password" (default) | "remote" | "remote+password"
 //! uv   = "bio"           # remote: "bio" (default) | "pin" | "none"
 //! ttl  = 300             # password: token lifetime in seconds
 //! approve_timeout = 90   # remote: seconds to wait for the phone
@@ -35,6 +35,11 @@ pub enum AuthMode {
     Password,
     /// The paired phone (encedo-authenticator) approves each token.
     Remote,
+    /// The phone first; the HEM password when the phone is not at hand: "Use
+    /// password" while the phone is asked (the window), or `ssh-add -X` /
+    /// `run --login` beforehand (until Lock).
+    #[serde(rename = "remote+password")]
+    RemotePassword,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -148,5 +153,7 @@ mod tests {
         let bad_line = KeyConfig { kid: "9904cd6be703202a186dd8a2d1bfdb74".into(), pubkey: "ssh-ed25519 !!".into() };
         assert!(bad_line.agent_key().is_err());
         assert!(toml::from_str::<Config>("url = \"x\"\nauth = \"telepathy\"").is_err());
+        let both: Config = toml::from_str("url = \"x\"\nauth = \"remote+password\"").unwrap();
+        assert_eq!(both.auth, AuthMode::RemotePassword);
     }
 }

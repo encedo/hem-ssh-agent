@@ -11,8 +11,9 @@
 //! (or `ssh-add -X`) hands over another. `Request` refuses unknown fields, so
 //! the rule holds even when a field would be convenient.
 //!
-//! Four operations: `whoami` (build and caller), `watch` (a snapshot of the
-//! state now and on every change), `token` (use this token), `lock`.
+//! Five operations: `whoami` (build and caller), `watch` (a snapshot of the
+//! state now and on every change), `token` (use this token), `lock`,
+//! `use_password` (stop asking the phone, wait for the window's token).
 
 use std::io;
 
@@ -40,6 +41,10 @@ pub enum Op {
     Token,
     /// Drop the token (and the derived key of `ssh-add -X`).
     Lock,
+    /// "Use password" (`auth = "remote+password"`): stop asking the phone;
+    /// the waiting signs take the token the window hands over next.
+    #[serde(rename = "use_password")]
+    UsePassword,
 }
 
 /// Which artifact is speaking: a window and an agent from different builds
@@ -89,7 +94,7 @@ impl Request {
                     return Err("token needs to say which build is asking".into());
                 }
             }
-            Op::Whoami | Op::Watch | Op::Lock => {
+            Op::Whoami | Op::Watch | Op::Lock | Op::UsePassword => {
                 if self.token.is_some() {
                     return Err(format!("{:?} takes no token", self.op).to_lowercase());
                 }
@@ -142,12 +147,12 @@ pub struct Status {
     /// `locked` (password mode, no token and no derived key), `ready`, or
     /// `waiting` (a token is being approved on the phone).
     pub state: String,
-    /// `password` or `remote` (the configuration's `auth`).
+    /// `password`, `remote` or `remote+password` (the configuration's `auth`).
     pub auth: String,
     /// The HEM's address (the configuration's `url`): where the window logs in.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
-    /// Password mode: the token lifetime to ask for, in seconds (`ttl`).
+    /// When the password may be used: the token lifetime to ask for, in seconds (`ttl`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u32>,
     pub keys: Vec<KeyInfo>,
@@ -174,6 +179,10 @@ pub struct Pending {
     pub note: String,
     /// Unix seconds.
     pub since: i64,
+    /// "Use password" was chosen: the phone is no longer asked; the sign
+    /// waits for the window's token.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub password: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -314,6 +323,10 @@ async fn handle(b: &[u8], who: &str, agent: &HemAgent) -> (Reply, bool) {
             agent.lock().await;
             (Reply::ok(), false)
         }
+        Op::UsePassword => match agent.use_password().await {
+            Ok(()) => (Reply::ok(), false),
+            Err(e) => (Reply::err(&e.code, e.to_string()), false),
+        },
         Op::Token => {
             let theirs = req.build.unwrap_or_default();
             if theirs != current {
@@ -375,6 +388,10 @@ mod tests {
         assert!(empty.validate().is_err());
         let lock_tok: Request = serde_json::from_str(r#"{"op":"lock","token":"t"}"#).unwrap();
         assert!(lock_tok.validate().is_err());
+        let use_pw: Request = serde_json::from_str(r#"{"op":"use_password"}"#).unwrap();
+        assert!(use_pw.validate().is_ok());
+        let use_pw_tok: Request = serde_json::from_str(r#"{"op":"use_password","token":"t"}"#).unwrap();
+        assert!(use_pw_tok.validate().is_err());
     }
 
     #[tokio::test]
