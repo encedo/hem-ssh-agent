@@ -25,6 +25,20 @@ What it does:
 
 Flags: `-control`, `-config`, `-no-start`, `-theme auto|dark|light`, `-version`.
 
+Linux (tested on Ubuntu 24.04 GNOME, Wayland session):
+
+- The window runs on X11 - XWayland under Wayland - whenever `DISPLAY` is
+  set (`FYNE_PLATFORM=x11`, as Fyne itself does on GNOME). On native Wayland
+  (`FYNE_PLATFORM=wayland`, or a session without XWayland) a window cannot
+  centre or raise itself without an xdg-activation token, which a tray click
+  does not carry: *Unlock...* may open behind other windows, anywhere
+  (GNOME: `gsettings set org.gnome.mutter center-new-windows true` at least
+  centres it). The display-scale correction (`scale_linux.go`) is skipped
+  there: the compositor scales.
+- With GNOME's *Do Not Disturb* on, the phone-approval notification is not
+  shown as a banner: the request is in the tray menu (*Waiting for a phone*)
+  and in the notification list.
+
 ## Build
 
 Needs Go (1.26.5 or later) and a C compiler for cgo (Fyne uses OpenGL):

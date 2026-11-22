@@ -179,6 +179,9 @@ func (u *ui) build(tray bool) {
 
 func (u *ui) present() {
 	u.renderWindow()
+	// Centred - otherwise left to the window manager. A no-op on native
+	// Wayland, where the window cannot place or raise itself (gui/README.md).
+	u.win.CenterOnScreen()
 	u.win.Show()
 	u.win.RequestFocus()
 	u.win.Canvas().Focus(u.pass)
@@ -459,7 +462,8 @@ func (u *ui) renderMenu() {
 		items = append(items, fyne.NewMenuItem("Start the agent", u.onStartAgent))
 	}
 	unlock := fyne.NewMenuItem("Unlock...", u.present)
-	unlock.Disabled = !seen || s.Auth != "password"
+	// Like Lock, only when it does something: not while unlocked.
+	unlock.Disabled = !seen || s.Auth != "password" || s.State == "ready"
 	lock := fyne.NewMenuItem("Lock", u.onLock)
 	lock.Disabled = !seen || (s.State == "locked" && !u.remembering())
 	items = append(items, unlock, lock, fyne.NewMenuItem("Show log", u.onLog))
@@ -480,7 +484,7 @@ func (u *ui) renderWindow() {
 		text += "\n• " + k.Comment
 	}
 	u.info.SetText(text)
-	if seen && s.Auth == "password" {
+	if seen && s.Auth == "password" && s.State != "ready" {
 		u.unlock.Enable()
 		u.pass.Enable()
 		u.remember.Enable()

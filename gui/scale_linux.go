@@ -21,6 +21,20 @@ const (
 )
 
 func alignScaleWithDesktop() (string, bool) {
+	// X11 - XWayland under a Wayland session - whenever there is a DISPLAY:
+	// there the window can centre and raise itself (on native Wayland Fyne
+	// cannot without an xdg-activation token, which a tray click does not
+	// carry) and Fyne sizes it the way this file predicts. Fyne already does
+	// this on GNOME; KDE, sway and the like would get native Wayland. Never
+	// over a FYNE_PLATFORM somebody set.
+	if os.Getenv("FYNE_PLATFORM") == "" && os.Getenv("DISPLAY") != "" {
+		os.Setenv("FYNE_PLATFORM", "x11")
+	}
+	// Native Wayland, chosen explicitly: the compositor scales and Fyne's own
+	// scale is 1 - nothing to correct (the X11 prediction made it 0.8x).
+	if os.Getenv("FYNE_PLATFORM") == "wayland" {
+		return "", false
+	}
 	if os.Getenv("FYNE_SCALE") != "" {
 		return "", false
 	}
