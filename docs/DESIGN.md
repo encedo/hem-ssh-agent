@@ -178,7 +178,12 @@ just to list.
 - Socket / pipe accessible to the current user only. Windows: the pipe's
   access list is `D:P(A;;GA;;;SY)(A;;GA;;;<user SID>)`, remote clients
   refused; checked with .NET `GetAccessControl` (2026-11-21). Unix: 0600
-  socket in a 0700 directory.
+  socket in a 0700 directory, created 0600 (umask 0177 around bind), removed
+  on Ctrl-C, SIGTERM and SIGHUP.
+- The log names keys, users and hosts: on Linux / macOS the file is 0600 and
+  a directory it creates 0700. ssh-agent-lib's debug and trace records (every
+  request, the `ssh-add -X` password and the data to sign among them) are
+  dropped whatever `RUST_LOG` says (found on the Linux test, 2026-11-22).
 - Agent forwarding (`ssh -A`) lets a remote host ask for signatures while the
   session lasts - document it; optional confirm-per-sign.
 - The agent holds a derived key or a token in memory, never the password;

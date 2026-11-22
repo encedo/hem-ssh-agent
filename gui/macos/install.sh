@@ -23,6 +23,15 @@ if [ ! -d "$src/$name" ]; then
 	exit 2
 fi
 
+# Started at logon, the agent reads this; without it it stops at once (as
+# install.ps1 on Windows, the configuration comes first). No XDG_CONFIG_HOME:
+# a LaunchAgent does not get the shell's environment.
+cfg="$HOME/.config/hem-ssh-agent/config.toml"
+if [ "$autostart" = 1 ] && [ ! -f "$cfg" ]; then
+	echo "No configuration at $cfg - make one first (README.md), or install with --no-autostart." >&2
+	exit 1
+fi
+
 apps="$HOME/Applications"
 plist="$HOME/Library/LaunchAgents/$label.plist"
 gui="$apps/$name/Contents/MacOS/hem-ssh-agent-gui"

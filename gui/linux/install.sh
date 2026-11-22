@@ -29,6 +29,14 @@ done
 icon="$here/icon.svg"
 [ -f "$icon" ] || icon="$here/../icon.svg"
 
+# Started at logon, the agent reads this; without it it stops at once (as
+# install.ps1 on Windows, the configuration comes first).
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}/hem-ssh-agent/config.toml"
+if [ "$autostart" = 1 ] && [ ! -f "$cfg" ]; then
+	echo "No configuration at $cfg - make one first (README.md), or install with --no-autostart." >&2
+	exit 1
+fi
+
 # A running copy of the window is replaced at the next start; the agent
 # keeps running from memory until it is stopped.
 install -Dm755 "$bin/hem-ssh-agent" "$PREFIX/bin/hem-ssh-agent"

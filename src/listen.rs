@@ -128,7 +128,13 @@ pub async fn bind(address: &str) -> io::Result<Listener> {
             }
             std::fs::remove_file(address)?; // stale socket from a previous run
         }
-        let l = tokio::net::UnixListener::bind(address)?;
+        // Created 0600 (umask 0177 around bind), not narrowed afterwards: with a
+        // `listen` in a shared directory there is no moment with the umask's
+        // mode. The umask is the process's, but nothing else creates files now.
+        let old = unsafe { libc::umask(0o177) };
+        let bound = tokio::net::UnixListener::bind(address);
+        unsafe { libc::umask(old) };
+        let l = bound?;
         std::fs::set_permissions(address, std::fs::Permissions::from_mode(0o600))?;
         Ok(l)
     }

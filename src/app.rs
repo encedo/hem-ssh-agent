@@ -23,8 +23,11 @@ const LOG_ROTATE_BYTES: u64 = 1024 * 1024;
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
-    /// Configuration file [default: %APPDATA%\hem-ssh-agent\config.toml,
-    /// ~/.config/hem-ssh-agent/config.toml]
+    #[cfg_attr(windows, doc = r"Configuration file [default: %APPDATA%\hem-ssh-agent\config.toml]")]
+    #[cfg_attr(
+        not(windows),
+        doc = "Configuration file [default: $XDG_CONFIG_HOME/hem-ssh-agent/config.toml or ~/.config/hem-ssh-agent/config.toml]"
+    )]
     #[arg(long, global = true)]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -60,8 +63,11 @@ enum Cmd {
         /// The GUI's control channel (pipe / socket); overrides `control` in the file.
         #[arg(long)]
         control: Option<String>,
-        /// Log to this file instead of the terminal [background default:
-        /// %LOCALAPPDATA%\hem-ssh-agent\agent.log].
+        #[cfg_attr(
+            windows,
+            doc = r"Log to this file instead of the terminal [background default: %LOCALAPPDATA%\hem-ssh-agent\agent.log]."
+        )]
+        #[cfg_attr(not(windows), doc = "Log to this file instead of the terminal.")]
         #[arg(long)]
         log_file: Option<PathBuf>,
     },
@@ -150,16 +156,52 @@ fn init_log(file: Option<&Path>) -> std::io::Result<()> {
     let mut b = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("hem_ssh_agent=info"));
     if let Some(path) = file {
         if let Some(dir) = path.parent() {
+            // A new log directory is the owner's alone; an existing one is left
+            // as it is (--log-file may point into a shared directory).
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700).create(dir)?;
+            #[cfg(not(unix))]
             std::fs::create_dir_all(dir)?;
         }
         if std::fs::metadata(path).map(|m| m.len() > LOG_ROTATE_BYTES).unwrap_or(false) {
             let _ = std::fs::rename(path, path.with_extension("log.old"));
         }
-        let f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut open = std::fs::OpenOptions::new();
+        open.create(true).append(true);
+        // The log names keys, hosts and users: the owner's alone, an older
+        // world-readable one narrowed too.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+        let f = open.open(path)?;
+        #[cfg(unix)]
+        f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         b.target(env_logger::Target::Pipe(Box::new(f))).write_style(env_logger::WriteStyle::Never);
     }
-    b.init();
+    let logger = b.build();
+    let max = logger.filter();
+    log::set_boxed_logger(Box::new(NoSecrets(logger))).map_err(std::io::Error::other)?;
+    log::set_max_level(max);
     Ok(())
+}
+
+/// ssh-agent-lib logs every request with Debug at debug level - the HEM
+/// password of `ssh-add -X` / `-x` and the data to sign among them: its debug
+/// and trace records are dropped whatever RUST_LOG says. Only drops; what is
+/// logged otherwise is env_logger's choice.
+struct NoSecrets(env_logger::Logger);
+
+impl log::Log for NoSecrets {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        !(m.target().starts_with("ssh_agent_lib") && m.level() > log::Level::Info) && self.0.enabled(m)
+    }
+    fn log(&self, r: &log::Record) {
+        if self.enabled(r.metadata()) {
+            self.0.log(r);
+        }
+    }
+    fn flush(&self) {
+        self.0.flush();
+    }
 }
 
 /// %LOCALAPPDATA%\hem-ssh-agent\agent.log; ~/.local/state/hem-ssh-agent/agent.log.
@@ -312,7 +354,7 @@ async fn run(cfg: Config, login: bool, listen_flag: Option<String>, control_flag
     tokio::select! {
         r = listen::serve(listener, agent.clone()) => r?,
         r = crate::control::serve(control_listener, agent) => r?,
-        _ = tokio::signal::ctrl_c() => log::info!("stopping"),
+        _ = shutdown() => log::info!("stopping"),
     }
     #[cfg(unix)]
     {
@@ -320,6 +362,25 @@ async fn run(cfg: Config, login: bool, listen_flag: Option<String>, control_flag
         let _ = std::fs::remove_file(&control_address);
     }
     Ok(())
+}
+
+/// Ctrl-C; on Linux / macOS also SIGTERM (kill, systemd, logout) and SIGHUP
+/// (the terminal closed), so that the sockets are removed and SSH_AUTH_SOCK
+/// does not point at a dead one until the next start.
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let (Ok(mut term), Ok(mut hup)) = (signal(SignalKind::terminate()), signal(SignalKind::hangup())) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+                _ = hup.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(windows)]
