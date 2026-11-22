@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the macOS bundle (Xcode command line tools, cargo, go):
-# target/dist/hem-ssh-agent-<version>-macos-<arch>.zip holding
+# target/dist/hem-ssh-agent-<version>-macos-<amd64|arm64>.zip holding
 # "HEM SSH agent.app" (the window and the agent in Contents/MacOS: the window
 # starts the agent beside it) and install.sh / uninstall.sh.
 #
@@ -21,20 +21,29 @@ fi
 commit=$(git -C "$root" rev-parse --short HEAD)
 [ -z "$(git -C "$root" status --porcelain --untracked-files=no)" ] || commit="$commit-dirty"
 build="$version+$commit"
-arch=$(uname -m)
 
-echo "==> agent $build"
-HEM_SSH_AGENT_COMMIT="$commit" cargo build --release --manifest-path "$root/Cargo.toml"
-echo "==> window $build"
-(cd "$root/gui" && go build -trimpath -tags migrated_fynedo \
-	-ldflags "-s -w -X main.version=$build" -o "$root/target/release/hem-ssh-agent-gui" .)
+# ARCH=amd64 or arm64, on either Mac (default: this Mac's): Apple's clang
+# carries both, so ARCH picks the agent's Rust target (`rustup target add` it
+# once) and the window's GOARCH.
+case "${ARCH:-$(uname -m)}" in
+amd64 | x86_64) arch=amd64 triple=x86_64-apple-darwin ;;
+arm64 | aarch64) arch=arm64 triple=aarch64-apple-darwin ;;
+*) echo "ARCH must be amd64 or arm64" >&2; exit 1 ;;
+esac
+out="$root/target/$triple/release"
+
+echo "==> agent $build ($arch)"
+HEM_SSH_AGENT_COMMIT="$commit" cargo build --release --target "$triple" --manifest-path "$root/Cargo.toml"
+echo "==> window $build ($arch)"
+(cd "$root/gui" && CGO_ENABLED=1 GOARCH=$arch go build -trimpath -tags migrated_fynedo \
+	-ldflags "-s -w -X main.version=$build" -o "$out/hem-ssh-agent-gui" .)
 
 name="hem-ssh-agent-$version-macos-$arch"
 stage="$root/target/dist/$name"
 app="$stage/HEM SSH agent.app"
 rm -rf "$stage"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$root/target/release/hem-ssh-agent-gui" "$root/target/release/hem-ssh-agent" "$app/Contents/MacOS/"
+cp "$out/hem-ssh-agent-gui" "$out/hem-ssh-agent" "$app/Contents/MacOS/"
 sed -e "s/@VERSION@/$version/" -e "s/@BUILD@/$build/" "$here/Info.plist.in" > "$app/Contents/Info.plist"
 
 # icon.icns from the 1024 px icon.
@@ -59,6 +68,6 @@ echo "==> target/dist/$name.zip"
 cli="hem-ssh-agent-cli-$version-macos-$arch"
 rm -rf "$root/target/dist/$cli"
 mkdir -p "$root/target/dist/$cli"
-cp "$root/target/release/hem-ssh-agent" "$root/README.md" "$root/LICENSE" "$root/target/dist/$cli/"
+cp "$out/hem-ssh-agent" "$root/README.md" "$root/LICENSE" "$root/target/dist/$cli/"
 tar -C "$root/target/dist" -czf "$root/target/dist/$cli.tar.gz" "$cli"
 echo "==> target/dist/$cli.tar.gz"

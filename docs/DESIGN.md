@@ -211,7 +211,8 @@ gui/windows/    build.sh (zip), install.ps1 / uninstall.ps1 (per user), icon
 gui/linux/      build.sh (tar.gz), install.sh / uninstall.sh (~/.local, XDG autostart)
 gui/macos/      build.sh (.app, ad hoc signed), install.sh / uninstall.sh (LaunchAgent)
 .github/workflows/  ci.yml (every push: ASCII check + build.yml with bundles uploaded),
-                build.yml (linux-amd64, macos-arm64, windows-amd64: clippy, tests,
+                build.yml (linux, macos, windows x amd64, arm64 - on runners of
+                that kind, macOS amd64 cross-built on arm64: clippy, tests,
                 gui vet/test, gui/<platform>/build.sh); Windows signing to come
 ```
 

@@ -1,11 +1,14 @@
 name: Build
 
-# Every platform the agent ships to - Linux, macOS, Windows - built the same
-# way: test, then the platform's own gui/<platform>/build.sh, the script a
-# developer runs, so CI builds what a person would. One cell per platform,
-# because the window links a GUI toolkit through cgo and cgo builds for the
-# machine it runs on; the agent (Rust) is built in the same cell, so both
-# halves carry one stamp (<version>+<commit>) and accept each other.
+# Every platform the agent ships to - Linux, macOS, Windows, each on amd64 and
+# arm64 - built the same way: test, then the platform's own
+# gui/<platform>/build.sh, the script a developer runs, so CI builds what a
+# person would. One cell per platform and architecture, on a runner of that
+# kind (the matrix is encedo-wg-hsm's), because the window links a GUI toolkit
+# through cgo and cgo builds for the machine it runs on - except macOS, whose
+# clang carries both: the amd64 bundle is built on the arm64 runner and tested
+# in the arm64 cell. The agent (Rust) is built in the same cell, so both halves
+# carry one stamp (<version>+<commit>) and accept each other.
 #
 # Each cell leaves, under the artifact hem-ssh-agent-<os>-<arch>:
 #
@@ -31,10 +34,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # native: the cell runs what it builds, so it also tests it.
         include:
-          - { os: linux,   arch: amd64, runner: ubuntu-24.04 }
-          - { os: macos,   arch: arm64, runner: macos-latest }
-          - { os: windows, arch: amd64, runner: windows-latest }
+          - { os: linux,   arch: amd64, runner: ubuntu-24.04,     native: true }
+          # Free arm64 Linux runners for public repositories.
+          - { os: linux,   arch: arm64, runner: ubuntu-24.04-arm, native: true }
+          - { os: macos,   arch: amd64, runner: macos-latest,     native: false, rust-target: x86_64-apple-darwin }
+          - { os: macos,   arch: arm64, runner: macos-latest,     native: true }
+          - { os: windows, arch: amd64, runner: windows-latest,   native: true }
+          - { os: windows, arch: arm64, runner: windows-11-arm,   native: true }
+
+    env:
+      # Read by the build.sh scripts: macOS builds this architecture, the
+      # others check that the runner is of it.
+      ARCH: ${{ matrix.arch }}
 
     steps:
       - name: Checkout
@@ -50,9 +63,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: ${{ matrix.rust-target }}
 
+      # Per cell: the two macOS cells share a runner kind and a job name.
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.arch }}
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -71,10 +88,37 @@ jobs:
             libgl1-mesa-dev xorg-dev libxxf86vm-dev \
             libwayland-dev libxkbcommon-dev wayland-protocols
 
+      # From encedo-wg-hsm: the Windows ARM runner image has only x86 and x64
+      # MinGW, so the `gcc` on PATH is an emulated x86-64 compiler, which cgo's
+      # arm64 code does not assemble. A native aarch64 one from llvm-mingw (one
+      # pinned archive with a checksum), as CC for the window's cgo. Unpacked
+      # beside the checkout, out of every upload path.
+      - name: Windows ARM64 build dependencies
+        if: matrix.os == 'windows' && matrix.arch == 'arm64'
+        shell: bash
+        run: |
+          set -eu
+          ver=20260908
+          sum=7fe35f60407473c420ac72b25137f54385b0affd2c42efd507c0062fc626ab56
+          zip=llvm-mingw-$ver-ucrt-aarch64.zip
+          work=../_toolchain
+          rm -rf "$work"; mkdir -p "$work"
+          curl -sSLf -o "$work/$zip" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/$zip"
+          echo "$sum  $work/$zip" | sha256sum -c -
+          powershell -NoProfile -Command "Expand-Archive -Force '$work/$zip' '$work/x'"
+          # pwd -W: D:/a/... - a path the Go toolchain, a Windows program, reads.
+          bin="$(cd "$work/x/llvm-mingw-$ver-ucrt-aarch64/bin" && pwd -W)"
+          "$bin/aarch64-w64-mingw32-gcc.exe" --version | head -1
+          {
+            echo "CC=$bin/aarch64-w64-mingw32-gcc.exe"
+            echo "CXX=$bin/aarch64-w64-mingw32-g++.exe"
+          } >> "$GITHUB_ENV"
+
       # Once, on Linux: a Windows checkout may carry CRLF, which gofmt reports.
       # Only gui/*.go - gui/hem-sdk-go is another repository.
       - name: gofmt (window)
-        if: matrix.os == 'linux'
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
         working-directory: gui
         run: |
           unformatted="$(gofmt -l *.go)"
@@ -83,15 +127,18 @@ jobs:
           fi
 
       - name: Clippy
+        if: matrix.native
         shell: bash
         run: cargo clippy --locked --all-targets -- -D warnings
 
       # Offline: the live tests skip without HEM_URL / HEM_PASSWORD.
       - name: Test (agent)
+        if: matrix.native
         shell: bash
         run: cargo test --locked
 
       - name: Vet and test (window)
+        if: matrix.native
         working-directory: gui
         shell: bash
         run: |

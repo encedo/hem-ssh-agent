@@ -1,4 +1,4 @@
-hem-ssh-agent for Windows (amd64), build @BUILD@
+hem-ssh-agent for Windows (@ARCH@), build @BUILD@
 An SSH agent whose Ed25519 keys live in an Encedo HEM (firmware 1.3 or later).
 
   hem-ssh-agent.exe      the command line: keys, pubkey, run, install
