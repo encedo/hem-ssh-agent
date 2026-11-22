@@ -52,16 +52,30 @@ pub fn default_control_address() -> io::Result<String> {
 }
 
 /// A directory private to the user: `XDG_RUNTIME_DIR` (systemd: 0700), else
-/// `~/.hem-ssh-agent` created 0700.
+/// `~/.hem-ssh-agent` kept 0700: an existing one that is wider is narrowed
+/// (mode() only applies to a directory it creates).
 #[cfg(unix)]
 fn runtime_dir() -> io::Result<std::path::PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     Ok(match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(d) => std::path::PathBuf::from(d),
         None => {
             let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME not set"))?;
             let d = std::path::PathBuf::from(home).join(".hem-ssh-agent");
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d)?;
+            let meta = std::fs::symlink_metadata(&d)?;
+            if !meta.is_dir() {
+                return Err(io::Error::other(format!("{} is not a directory", d.display())));
+            }
+            use std::os::unix::fs::MetadataExt;
+            // Safety: getuid has no preconditions and cannot fail.
+            let uid = unsafe { libc::getuid() };
+            if meta.uid() != uid {
+                return Err(io::Error::other(format!("{} is owned by uid {}, not {uid}", d.display(), meta.uid())));
+            }
+            if meta.permissions().mode() & 0o077 != 0 {
+                std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700))?;
+            }
             d
         }
     })
@@ -120,6 +134,12 @@ pub async fn bind(address: &str) -> io::Result<Listener> {
     }
 }
 
+/// The current user's SID as a string (S-1-5-21-...).
+#[cfg(windows)]
+pub(crate) fn user_sid() -> io::Result<String> {
+    pipe::user_sid()
+}
+
 /// Serves clients until the listener fails.
 pub async fn serve(listener: Listener, agent: HemAgent) -> Result<(), AgentError> {
     listen(listener, agent).await
@@ -171,7 +191,7 @@ mod pipe {
     }
 
     /// The current user's SID as a string (S-1-5-21-...).
-    fn user_sid() -> io::Result<String> {
+    pub(super) fn user_sid() -> io::Result<String> {
         // Safety: the pseudo handle of the current process needs no closing.
         unsafe { process_sid(GetCurrentProcess()) }
     }

@@ -1,0 +1,13 @@
+Website = "https://github.com/encedo/hem-ssh-agent"
+
+[Details]
+Icon = "icon.png"
+Name = "HEM SSH agent"
+ID = "com.encedo.hem-ssh-agent"
+Version = "0.1.0"
+Build = 1
+
+# Every UI call from another goroutine goes through fyne.Do. `fyne package`
+# reads this; a plain `go build` needs `-tags migrated_fynedo` instead.
+[Migrations]
+fyneDo = true

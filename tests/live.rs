@@ -19,7 +19,10 @@ const TEST_DESCR: &[u8] = b"hem-ssh-agent-test";
 
 #[tokio::test]
 async fn agent_lists_and_signs() {
-    let (Ok(url), Ok(password)) = (std::env::var("HEM_URL"), std::env::var("HEM_PASSWORD")) else { return };
+    let (Ok(url), Ok(password)) = (std::env::var("HEM_URL"), std::env::var("HEM_PASSWORD")) else {
+        eprintln!("skipped: HEM_URL and HEM_PASSWORD not set");
+        return;
+    };
     let hem = Arc::new(Hem::new(&url, HemOptions::default()).unwrap());
 
     // The test key: found by description, created on the first run only.

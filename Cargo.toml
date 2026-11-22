@@ -35,7 +35,17 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_System_Pipes",
     "Win32_System_Threading",
+    # The Pageant window (src/pageant.rs).
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
 ] }
+
+# The owner check of ~/.hem-ssh-agent (src/listen.rs); tokio already uses it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # The live test checks the agent's signatures independently, as an SSH server would.
@@ -49,3 +59,6 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.release]
+strip = true

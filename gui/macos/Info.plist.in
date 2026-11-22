@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>HEM SSH agent</string>
+	<key>CFBundleDisplayName</key>
+	<string>HEM SSH agent</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.encedo.hem-ssh-agent</string>
+	<key>CFBundleExecutable</key>
+	<string>hem-ssh-agent-gui</string>
+	<key>CFBundleIconFile</key>
+	<string>icon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUILD@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<!-- A menu-bar application: no Dock icon. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>HEM SSH agent talks to your Encedo HEM, which may be a device on the local network.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=HEM SSH agent
+GenericName=SSH agent
+Comment=SSH keys that never leave the Encedo HEM
+Exec=hem-ssh-agent-gui
+Icon=hem-ssh-agent
+Terminal=false
+Categories=Utility;Security;
+Keywords=SSH;agent;git;Encedo;HEM;
+# GLFW takes WM_CLASS from the window title (gui/main.go windowTitle); the
+# desktop matches the window to this entry by it.
+StartupWMClass=HEM SSH agent

@@ -11,5 +11,7 @@ pub mod config;
 pub mod control;
 pub mod listen;
 pub mod note;
+#[cfg(windows)]
+pub mod pageant;
 
 pub use agent::{key_scopes, load_key, AgentKey, Auth, HemAgent};

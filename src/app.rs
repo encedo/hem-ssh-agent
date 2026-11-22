@@ -65,12 +65,18 @@ enum Cmd {
         #[arg(long)]
         log_file: Option<PathBuf>,
     },
-    /// Start the agent at logon (Windows: hem-ssh-agentw.exe from the
-    /// current user's Run key; no administrator rights needed).
+    /// Start at logon from the current user's Run key (Windows; no
+    /// administrator rights needed): the window, hem-ssh-agent-gui.exe, when
+    /// it is next to this program - it starts the agent - otherwise the
+    /// agent itself, hem-ssh-agentw.exe. Linux and macOS: gui/linux,
+    /// gui/macos install scripts.
     Install {
         /// Also start it now, in the background.
         #[arg(long)]
         start: bool,
+        /// Register the agent itself even when the window is there.
+        #[arg(long)]
+        no_gui: bool,
     },
     /// Stop starting the agent at logon (a running agent keeps running).
     Uninstall,
@@ -134,7 +140,7 @@ async fn dispatch(cli: Cli, background: bool) -> Res<()> {
             let cfg = load_config(cli.config, true)?.expect("required");
             run(cfg, login && !background, listen, control).await
         }
-        Cmd::Install { start } => install(cli.config, start),
+        Cmd::Install { start, no_gui } => install(cli.config, start, no_gui),
         Cmd::Uninstall => uninstall(),
     }
 }
@@ -191,7 +197,9 @@ fn load_config(path: Option<PathBuf>, required: bool) -> Res<Option<Config>> {
 fn password() -> std::io::Result<Zeroizing<String>> {
     match std::env::var("HEM_PASSWORD") {
         Ok(p) => Ok(Zeroizing::new(p)),
-        Err(_) => rpassword::prompt_password("HEM password: ").map(Zeroizing::new),
+        Err(_) => rpassword::prompt_password("HEM password: ").map(Zeroizing::new).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("cannot ask for the HEM password ({e}): no terminal? set HEM_PASSWORD"))
+        }),
     }
 }
 
@@ -290,6 +298,16 @@ async fn run(cfg: Config, login: bool, listen_flag: Option<String>, control_flag
     log::info!("control channel on {control_address}");
     #[cfg(unix)]
     eprintln!("export SSH_AUTH_SOCK={address}");
+    #[cfg(windows)]
+    let _pageant = if cfg.pageant {
+        crate::pageant::start(agent.clone(), tokio::runtime::Handle::current())?
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    if cfg.pageant {
+        log::warn!("pageant = true: Windows only, ignored");
+    }
 
     tokio::select! {
         r = listen::serve(listener, agent.clone()) => r?,
@@ -310,24 +328,27 @@ const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "hem-ssh-agent";
 
 #[cfg(windows)]
-fn install(config_flag: Option<PathBuf>, start: bool) -> Res<()> {
+fn install(config_flag: Option<PathBuf>, start: bool, no_gui: bool) -> Res<()> {
     use std::process::Command;
 
     let w = std::env::current_exe()?.with_file_name("hem-ssh-agentw.exe");
     if !w.exists() {
         return Err(format!("{} not found next to this program", w.display()).into());
     }
+    let gui = w.with_file_name("hem-ssh-agent-gui.exe");
+    let use_gui = !no_gui && gui.exists();
     // The configuration must be usable now, not at the next logon.
     let config_flag = config_flag.map(std::path::absolute).transpose()?;
     let cfg = load_config(config_flag.clone(), true)?.expect("required");
     agent_keys(&cfg)?;
 
-    let mut args = vec!["run".to_owned()];
+    // The window takes Go-style flags and passes --config on to the agent.
+    let (exe, mut args) = if use_gui { (gui, vec![]) } else { (w, vec!["run".to_owned()]) };
     if let Some(c) = &config_flag {
-        args.push("--config".into());
+        args.push(if use_gui { "-config" } else { "--config" }.into());
         args.push(c.display().to_string());
     }
-    let command = std::iter::once(format!("\"{}\"", w.display()))
+    let command = std::iter::once(format!("\"{}\"", exe.display()))
         .chain(args.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }))
         .collect::<Vec<_>>()
         .join(" ");
@@ -344,8 +365,12 @@ fn install(config_flag: Option<PathBuf>, start: bool) -> Res<()> {
     warn_openssh_service();
 
     if start {
-        Command::new(&w).args(&args).spawn()?;
-        println!("started in the background; `ssh-add -l` lists the keys");
+        Command::new(&exe).args(&args).spawn()?;
+        if use_gui {
+            println!("started: the tray icon; it starts the agent");
+        } else {
+            println!("started in the background; `ssh-add -l` lists the keys");
+        }
     }
     Ok(())
 }
@@ -380,16 +405,16 @@ fn uninstall() -> Res<()> {
     } else {
         println!("was not set to start at logon");
     }
-    println!("a running agent keeps running: taskkill /IM hem-ssh-agentw.exe");
+    println!("a running agent and window keep running: taskkill /IM hem-ssh-agent-gui.exe /IM hem-ssh-agentw.exe");
     Ok(())
 }
 
 #[cfg(unix)]
-fn install(_config: Option<PathBuf>, _start: bool) -> Res<()> {
-    Err("install: not on this platform yet (planned: systemd --user / launchd)".into())
+fn install(_config: Option<PathBuf>, _start: bool, _no_gui: bool) -> Res<()> {
+    Err("install: on Linux and macOS use gui/linux/install.sh or gui/macos/install.sh".into())
 }
 
 #[cfg(unix)]
 fn uninstall() -> Res<()> {
-    Err("uninstall: not on this platform yet".into())
+    Err("uninstall: on Linux and macOS use gui/linux/uninstall.sh or gui/macos/uninstall.sh".into())
 }

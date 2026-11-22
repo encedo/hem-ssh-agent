@@ -36,13 +36,21 @@ Windows (GNU toolchain): `~/.cargo/bin` and `C:\mingw64\bin` must be on PATH.
 GUI (`gui/`, Go + Fyne, cgo - see `gui/README.md`):
 
 ```bash
-cd gui && go vet ./... && go build -trimpath -ldflags "-H=windowsgui" -o ../target/gui/hem-ssh-agent-gui.exe .
+cd gui && go vet . && go build -trimpath -tags migrated_fynedo -ldflags "-H=windowsgui" -o ../target/gui/hem-ssh-agent-gui.exe .
+go test .
 # against a running agent in password mode (its control pipe / socket):
 HEM_CONTROL=<control address> HEM_PASSWORD=... go test -run Live -v .
+# bundles: gui/windows/build.sh, gui/linux/build.sh, gui/macos/build.sh -> target/dist/
 ```
 
 On the Windows dev machine pass pipe names from PowerShell: Git Bash eats
 the backslashes of `\\.\pipe\...` in arguments and environment variables.
+Run `gofmt` on `gui/*.go` only: `gui/hem-sdk-go` is another repository (a
+`gofmt -w .` rewrites its line endings).
+
+Pageant (`src/pageant.rs`, `tests/pageant.rs`): the test uses a window name
+of its own; never stop, replace or start beside the developer's running
+Pageant under its real name.
 
 ## Test device
 

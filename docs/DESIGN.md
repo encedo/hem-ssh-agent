@@ -130,11 +130,45 @@ expires, new signs fail until the window - or `ssh-add -X` - gives another;
 the agent has nothing to renew it with. A window from a different build is
 refused a `token` (`build` names both).
 
+**Remember the password** (a check box in the window, off by default, the
+person's choice, kept as a preference): the window then keeps the key
+derived from the password - never the password - in its own memory and
+hands the agent a fresh token (check-in, no token cache) a fifth of the
+lifetime before each expires (10 s .. 1 min), at once after an agent
+restart. It forgets the key on Lock (tray or window), on a lock before the
+token ran out (`ssh-add -x`), when the HEM asks for the password again, and
+on Quit. Still only tokens cross the channel.
+
+**The window starts the agent.** When the control channel does not answer
+at its start, the window runs the agent beside it (`hem-ssh-agentw.exe run`
+on Windows, `hem-ssh-agent run --log-file ...` on unix; `-config` is passed
+on), detached, so the agent outlives the window; later a tray item does it
+again. `-no-start` turns it off. `install` (Windows) puts the window in the
+Run key when it sits next to `hem-ssh-agent.exe`, else the agent; Linux
+and macOS log on through `gui/linux` (XDG autostart) and `gui/macos`
+(LaunchAgent).
+
+## Pageant (Windows)
+
+`pageant = true` in `config.toml` also answers PuTTY, plink, WinSCP and
+TortoiseGit (`src/pageant.rs`): a hidden top-level window of class and
+title `Pageant`, `WM_COPYDATA` with a file mapping, exactly as PuTTY 0.85's
+client and server do (windows/agent-client.c, windows/pageant.c): the
+mapping must be owned by this user's SID or by the owner of the agent's
+process, a length beyond the mapping is answered `FAILURE` unread, the
+request is copied out before it is parsed. PuTTY 0.75+ tries Pageant's
+named pipe first and falls back to the window, so the window serves old
+and new clients. **It stays off while a Pageant runs** (logged): two
+windows of that name and neither is reliably found, and the person's
+Pageant is never displaced. Forwarding other keys to a running Pageant is
+not done.
+
 ## Configuration
 
 `config.toml` in `%APPDATA%\hem-ssh-agent\` (Windows) or
 `~/.config/hem-ssh-agent/` (Linux, macOS); `--config` overrides. Format in
-`src/config.rs`: `url`, `auth`, `uv`, `ttl`, `approve_timeout`, `listen`, and `[[key]]` entries
+`src/config.rs`: `url`, `auth`, `uv`, `ttl`, `approve_timeout`, `listen`,
+`control`, `pageant`, and `[[key]]` entries
 with `kid` and `pubkey` (the line `hem-ssh-agent pubkey` prints). The public
 key is in the file so the agent lists keys without a token: no phone prompt
 just to list.
@@ -148,7 +182,10 @@ just to list.
 - Agent forwarding (`ssh -A`) lets a remote host ask for signatures while the
   session lasts - document it; optional confirm-per-sign.
 - The agent holds a derived key or a token in memory, never the password;
-  zeroized on drop.
+  zeroized on drop. The window holds a derived key only while "Remember the
+  password" is on (above).
+- Pageant: any process on the desktop can send the window a message; only
+  a mapping owned by this user is answered (PuTTY's check).
 - Every signature is in the HEM audit log.
 
 ## Code layout
@@ -160,14 +197,19 @@ src/note.rs     the note shown on the phone, read from the data to sign
 src/config.rs   config.toml
 src/control.rs  the GUI's control channel: framing, requests, snapshots
 src/listen.rs   transports: Windows named pipe (own listener with an access
-                list, the caller's SID; the only unsafe code) / unix socket -
-                the only #[cfg] code
+                list, the caller's SID) / unix socket
+src/pageant.rs  Windows: the Pageant window (WM_COPYDATA + file mapping)
+                - listen.rs and pageant.rs hold the unsafe and #[cfg] code
 src/app.rs      CLI: keys, pubkey, run, install, uninstall; logging
 src/main.rs     hem-ssh-agent.exe (console)
 src/bin/hem-ssh-agentw.rs   hem-ssh-agentw.exe (Windows, no console: run in the background)
 tests/live.rs   end to end through the real transport and an agent client (HEM_URL)
 tests/control.rs  the control channel through the real transport, offline
+tests/pageant.rs  the Pageant window as PuTTY's client calls it, offline
 gui/            the GUI (Go + Fyne); hem-sdk-go as a submodule
+gui/windows/    build.sh (zip), install.ps1 / uninstall.ps1 (per user), icon
+gui/linux/      build.sh (tar.gz), install.sh / uninstall.sh (~/.local, XDG autostart)
+gui/macos/      build.sh (.app, ad hoc signed), install.sh / uninstall.sh (LaunchAgent)
 ```
 
 Agent protocol: `ssh-agent-lib` 0.6 (MIT/Apache-2.0; framing, messages,
@@ -215,16 +257,17 @@ Windows 2.56 (bundled OpenSSH 10.5p1):
    `HKCU\...\CurrentVersion\Run` (per user, no administrator rights - a
    Task Scheduler logon trigger usually needs them) and warn when the
    Windows OpenSSH agent service can run. A second instance exits with a
-   log line (pipe taken). Next: Pageant transport (plink, PuTTY,
-   TortoiseGit) that coexists with the user's running Pageant (forwarding
-   other keys to it), never replacing it.
-3. Linux: unix socket (`SSH_AUTH_SOCK`), then macOS.
-4. Confirm-per-sign, packaging (signed binaries).
+   log line (pipe taken).
+3. The GUI, control channel, "remember the password", the window starting
+   the agent and at logon, packaging per platform, Pageant - **done**
+   (2026-11-22; Pageant stays off beside a running Pageant).
+4. Linux: unix socket (`SSH_AUTH_SOCK`), then macOS. macOS checked
+   2026-11-22 (CLI, ssh, SSHSIG, git signing, the GUI's live test).
+5. Confirm-per-sign, signed binaries (Authenticode, Developer ID).
 
 ## Open
 
-- Password mode: keep the derived key until `ssh-add -x` (now) or drop it
-  with each token and ask again.
-- The GUI: tray state, phone-approval notifications, the password window
-  handing over tokens; then autostart of the GUI instead of
-  `hem-ssh-agentw.exe`.
+- Pageant beside a running Pageant: forward the other keys to it, or the
+  named pipe (`\\.\pipe\pageant.<user>.<hash>`) - not done.
+- The control address in `config.toml` must also be given to the window
+  (`-control`): the window does not read the agent's file.

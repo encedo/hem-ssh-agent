@@ -12,6 +12,7 @@
 //! approve_timeout = 90   # remote: seconds to wait for the phone
 //! # listen = '\\.\pipe\openssh-ssh-agent'
 //! # control = '\\.\pipe\hem-ssh-agent-control'   # the GUI's channel
+//! # pageant = true       # Windows: also serve PuTTY / plink / WinSCP as Pageant
 //!
 //! [[key]]
 //! kid    = "9904cd6be703202a186dd8a2d1bfdb74"
@@ -71,6 +72,10 @@ pub struct Config {
     /// The control channel (`src/control.rs`); default `listen::default_control_address`.
     #[serde(default)]
     pub control: Option<String>,
+    /// Windows: also answer as Pageant, for PuTTY, plink, WinSCP
+    /// (`src/pageant.rs`); off while a Pageant runs.
+    #[serde(default)]
+    pub pageant: bool,
     #[serde(default, rename = "key")]
     pub keys: Vec<KeyConfig>,
 }

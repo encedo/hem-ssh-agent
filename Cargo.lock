@@ -639,6 +639,7 @@ dependencies = [
  "ed25519-dalek",
  "env_logger",
  "hem-sdk",
+ "libc",
  "log",
  "rpassword",
  "serde",

@@ -60,7 +60,7 @@ func TestLiveUnlockAndLock(t *testing.T) {
 	}
 
 	u := &ui{control: control}
-	exp, err := u.login(first, []byte(pass))
+	exp, err := u.login(first, []byte(pass), false)
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -69,11 +69,46 @@ func TestLiveUnlockAndLock(t *testing.T) {
 		t.Fatalf("after unlock: %+v (token exp %v)", s, exp)
 	}
 	t.Logf("ready until %s (ttl %d s)", exp.Format(time.TimeOnly), first.TTL)
+	if u.remembering() {
+		t.Fatal("remembered without being asked to")
+	}
 
 	if r, err := ask(ctx, control, Request{Op: "lock"}); err != nil || !r.OK {
 		t.Fatalf("lock: %v %+v", err, r)
 	}
 	if s := next(); s.State != "locked" || s.ExpiresAt != 0 {
 		t.Fatalf("after lock: %+v", s)
+	}
+
+	// Remember the password: a renewal is a new token from the derived key,
+	// with no password; Lock forgets it and nothing is renewed after that.
+	exp, err = u.login(first, []byte(pass), true)
+	if err != nil {
+		t.Fatalf("login (remember): %v", err)
+	}
+	if s := next(); s.State != "ready" || s.ExpiresAt != exp.Unix() || !u.remembering() {
+		t.Fatalf("after unlock (remember): %+v", s)
+	}
+	time.Sleep(2 * time.Second) // a later exp
+	u.last = s
+	u.renew()
+	s = next()
+	if s.State != "ready" || s.ExpiresAt <= exp.Unix() {
+		t.Fatalf("after renewal: %+v (first token exp %v)", s, exp)
+	}
+	t.Logf("renewed without the password: ready until %s", time.Unix(s.ExpiresAt, 0).Format(time.TimeOnly))
+
+	u.onLock()
+	if s := next(); s.State != "locked" {
+		t.Fatalf("after Lock: %+v", s)
+	}
+	if u.remembering() {
+		t.Fatal("still remembered after Lock")
+	}
+	u.renew() // nothing to renew with
+	select {
+	case s := <-snaps:
+		t.Fatalf("a snapshot after Lock: %+v", s)
+	case <-time.After(2 * time.Second):
 	}
 }
