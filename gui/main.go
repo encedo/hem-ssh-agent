@@ -68,8 +68,12 @@ var keepChoices = []struct {
 var iconSVG []byte
 
 type ui struct {
-	app     fyne.App
-	desk    desktop.App
+	app  fyne.App
+	desk desktop.App
+	// trayUp: a tray host shows the icon, so closing the window hides it;
+	// without one closing the window quits (UI goroutine only).
+	trayUp bool
+	// win: made at the first present (build), never before - see present.
 	win     fyne.Window
 	control string
 	// agentArgs start the agent (`run` and what it needs); nil: never start it.
@@ -144,13 +148,21 @@ func main() {
 	}
 
 	desk, hasDesk := a.(desktop.App)
-	u.build()
-	if hasDesk && trayAvailable() {
+	if hasDesk {
+		// Always before Run: Fyne starts its tray only there (a first tray
+		// menu set later never shows, and Quit then crashes). A tray host that
+		// registers later picks the icon up by itself (systray re-registers
+		// with the watcher); trayAvailable only decides about the window.
 		u.useTray(desk, icon)
+		// Renders before the tray started may be lost: once more after.
+		a.Lifecycle().SetOnStarted(u.renderMenu)
+	}
+	if hasDesk && trayAvailable() {
+		u.trayUp = true
 	} else {
 		u.present() // no tray: the window is the only way in
 		if hasDesk {
-			go u.waitForTray(desk, icon)
+			go u.waitForTray()
 		}
 	}
 	if noGL {
@@ -171,13 +183,14 @@ func (u *ui) useTray(desk desktop.App, icon fyne.Resource) {
 }
 
 // waitForTray: a tray host that registers after this window started (a
-// login autostart racing the desktop) still gets the icon - asked every few
-// seconds for two minutes. Until then the window is the way in.
-func (u *ui) waitForTray(desk desktop.App, icon fyne.Resource) {
+// login autostart racing the desktop) shows the icon by itself; from then on
+// closing the window hides it instead of quitting - asked every few seconds
+// for two minutes. Until then the window is the way in.
+func (u *ui) waitForTray() {
 	for range 40 {
 		time.Sleep(3 * time.Second)
 		if trayAvailable() {
-			fyne.Do(func() { u.useTray(desk, icon) })
+			fyne.Do(func() { u.trayUp = true })
 			return
 		}
 	}
@@ -228,6 +241,7 @@ func (u *ui) build() {
 	u.pass.OnSubmitted = func(string) { u.onUnlock() }
 	u.win.SetContent(container.NewVBox(u.info, u.pass, u.remember, hint,
 		container.NewGridWithColumns(2, u.lockBtn, u.unlock)))
+	u.win.SetFixedSize(true) // a small dialog: no maximise, no resize
 	u.win.Resize(fyne.NewSize(400, 0))
 	u.win.SetCloseIntercept(u.closeWindow)
 }
@@ -267,6 +281,13 @@ func (u *ui) present() {
 	if u.noGL {
 		u.notify("No window", noWindowHelp)
 		return
+	}
+	if u.win == nil {
+		// Made only now: Fyne applies a settings change (any Fyne app's first
+		// start touches its settings directory) to every window, and on
+		// Windows a window that was never shown crashes it (setDarkMode on a
+		// nil native window).
+		u.build()
 	}
 	u.renderWindow()
 	// Centred - otherwise left to the window manager. A no-op on native
@@ -610,7 +631,11 @@ func (u *ui) renderMenu() {
 	lock.Disabled = !u.canLock(s, seen)
 	// Show: the window at any time, also while unlocked (state, Lock).
 	items = append(items, unlock, lock, fyne.NewMenuItem("Show", u.present), fyne.NewMenuItem("Show log", u.onLog))
-	// Fyne adds Quit to a tray menu itself.
+	// Fyne adds Quit only to the first tray menu it renders, not to the ones
+	// set later: so here, every time.
+	quit := fyne.NewMenuItem("Quit", u.app.Quit)
+	quit.IsQuit = true
+	items = append(items, fyne.NewMenuItemSeparator(), quit)
 	u.desk.SetSystemTrayMenu(fyne.NewMenu(windowTitle, items...))
 }
 
@@ -780,7 +805,7 @@ func (u *ui) onUsePassword() {
 // while a sign waits for the password: that sign ends unsigned at once, as
 // with Lock, instead of waiting out its time.
 func (u *ui) closeWindow() {
-	if u.desk == nil {
+	if !u.trayUp {
 		u.app.Quit()
 		return
 	}

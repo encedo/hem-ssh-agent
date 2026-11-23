@@ -19,9 +19,14 @@ type Res<T> = Result<T, Box<dyn std::error::Error>>;
 /// A log file is moved to `<name>.old` at start when it is bigger than this.
 const LOG_ROTATE_BYTES: u64 = 1024 * 1024;
 
+/// `--version`: the build the window must match (`control::Build`), with the
+/// commit when the build stamped one.
+static VERSION: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| crate::control::Build::current().release);
+
 /// SSH agent whose keys live in an Encedo HEM.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version = VERSION.as_str(), about)]
 pub struct Cli {
     #[cfg_attr(windows, doc = r"Configuration file [default: %APPDATA%\hem-ssh-agent\config.toml]")]
     #[cfg_attr(

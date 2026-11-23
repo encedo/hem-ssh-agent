@@ -5,6 +5,11 @@ package main
 // snapshots it causes. Skipped unless HEM_CONTROL and HEM_PASSWORD are set:
 //
 //	HEM_CONTROL='\\.\pipe\...-control' HEM_PASSWORD=... go test -run Live -v
+//
+// The agent must run with auth = "password" and be of the same build as this
+// test: an unstamped one (cargo build), not a bundle (stamped
+// <version>+<commit>; the agent refuses a token from another build). On unix
+// keep HEM_CONTROL short: a socket path must fit sun_path (about 100 bytes).
 
 import (
 	"context"

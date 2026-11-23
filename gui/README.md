@@ -35,10 +35,12 @@ What it does:
   extension) the window stays open and closing it quits; a tray host that
   registers later (a login autostart racing the desktop) still gets the
   icon - asked for two minutes.
-- Windows without OpenGL 2.1 (a virtual machine without 3D acceleration,
-  some remote desktops): Fyne cannot open a window, so the window checks
-  before it starts and then never opens one - the tray menu works, *Unlock...*
-  and *Use password* say to use `ssh-add -X` in a terminal instead.
+- Windows without a working OpenGL 2.1 (a virtual machine without 3D
+  acceleration or with a broken 3D driver, some remote desktops): Fyne cannot
+  open a window, so the window checks before it starts (a hidden window and
+  one shader program, as Fyne makes them) and then never opens one - the tray
+  menu works, *Unlock...* and *Use password* say to use `ssh-add -X` in a
+  terminal instead.
 
 Flags: `-control`, `-config`, `-no-start`, `-theme auto|dark|light`, `-version`.
 
