@@ -51,8 +51,13 @@ type Status struct {
 	TTL       int       `json:"ttl,omitempty"`
 	Keys      []KeyInfo `json:"keys"`
 	ExpiresAt int64     `json:"expires_at,omitempty"`
-	Pending   *Pending  `json:"pending,omitempty"`
-	Last      *Last     `json:"last,omitempty"`
+	// Where the current token came from: phone | password (with ExpiresAt).
+	Source string `json:"source,omitempty"`
+	// The agent keeps the derived key (ssh-add -X): tokens without the phone
+	// until Lock.
+	Kept    bool     `json:"kept,omitempty"`
+	Pending *Pending `json:"pending,omitempty"`
+	Last    *Last    `json:"last,omitempty"`
 }
 
 type KeyInfo struct {

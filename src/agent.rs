@@ -94,6 +94,9 @@ struct State {
     /// The last token and its `exp`: reused while valid, so a sign within the
     /// lifetime needs no check-in, no device login and no phone.
     token: Option<(String, i64)>,
+    /// Where `token` came from: "phone" or "password" (the window's login or
+    /// the kept derived key) - shown in the status.
+    source: &'static str,
     /// Kids whose configured public key was compared with the HEM's.
     verified: HashSet<String>,
     /// The approval the phone is showing now (for the GUI).
@@ -141,6 +144,8 @@ impl HemAgent {
             ttl: None,
             keys: Vec::new(),
             expires_at: None,
+            source: None,
+            kept: false,
             pending: None,
             last: None,
         });
@@ -203,6 +208,7 @@ impl HemAgent {
             "ready"
         };
         let now = now();
+        let expires_at = st.token.as_ref().map(|(_, exp)| *exp).filter(|exp| *exp > now);
         Status {
             state: state.into(),
             auth: match self.auth {
@@ -214,7 +220,9 @@ impl HemAgent {
             url: self.url.to_string(),
             ttl: self.password_ttl(),
             keys: self.keys.iter().map(|k| KeyInfo { kid: k.kid.clone(), comment: k.comment.clone() }).collect(),
-            expires_at: st.token.as_ref().map(|(_, exp)| *exp).filter(|exp| *exp > now),
+            expires_at,
+            source: expires_at.map(|_| st.source.to_owned()),
+            kept: st.unlocked,
             pending: st.pending.clone(),
             last: st.last.clone(),
         }
@@ -270,6 +278,7 @@ impl HemAgent {
         let mut st = self.state.lock().await;
         self.verify_keys(&mut st, token).await?;
         st.token = Some((token.to_owned(), exp));
+        st.source = "password"; // the window logs in with the password
         self.publish(&st);
         drop(st);
         self.wake_waits(); // a phone or password wait takes it
@@ -321,6 +330,7 @@ impl HemAgent {
         st.unlocked = true;
         let exp = jwt_parse(&token).and_then(|p| p.get("exp").and_then(|e| e.as_i64())).unwrap_or(0);
         st.token = Some((token, exp));
+        st.source = "password";
         self.publish(&st);
         drop(st);
         self.wake_waits(); // a phone or password wait takes it
@@ -396,19 +406,20 @@ impl HemAgent {
                     Got::Stored(token) => return Ok(token),
                     Got::Fresh(token) => {
                         self.verify_keys(&mut st, &token).await?;
-                        return Ok(self.store(&mut st, token));
+                        return Ok(self.store(&mut st, token, "phone"));
                     }
                 }
             }
         };
         self.verify_keys(&mut st, &token).await?;
-        Ok(self.store(&mut st, token))
+        Ok(self.store(&mut st, token, "password"))
     }
 
     /// Keeps a new token for the signs to come.
-    fn store(&self, st: &mut State, token: String) -> String {
+    fn store(&self, st: &mut State, token: String, source: &'static str) -> String {
         let exp = jwt_parse(&token).and_then(|p| p.get("exp").and_then(|e| e.as_i64())).unwrap_or(0);
         st.token = Some((token.clone(), exp));
+        st.source = source;
         self.publish_at_expiry(exp);
         token
     }
@@ -437,7 +448,7 @@ impl HemAgent {
                 _ = wake.changed() => {
                     let st = self.state.lock().await;
                     if st.locks != locks {
-                        return Err(HemError::new("auth_password_required", "locked while the phone was asked"));
+                        return Err(HemError::new("locked", "locked while the phone was asked"));
                     }
                     if st.token_valid() {
                         log::info!("a token was handed over: the phone is no longer asked");
@@ -460,7 +471,7 @@ impl HemAgent {
             let left = {
                 let st = self.state.lock().await;
                 if st.locks != locks {
-                    return Err(HemError::new("auth_password_required", "locked while waiting for the password"));
+                    return Err(HemError::new("locked", "locked while waiting for the password"));
                 }
                 if st.token_valid() {
                     return Ok(st.token.as_ref().expect("valid").0.clone());
@@ -573,7 +584,8 @@ fn outcome(e: &HemError) -> &'static str {
     match e.code.as_str() {
         "denied" => "denied",
         "timeout" => "timeout",
-        "auth_password_required" => "locked",
+        // A Lock ended the wait; password mode: locked, no password given.
+        "locked" | "auth_password_required" => "locked",
         _ => "failed",
     }
 }

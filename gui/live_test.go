@@ -60,7 +60,7 @@ func TestLiveUnlockAndLock(t *testing.T) {
 	}
 
 	u := &ui{control: control}
-	exp, err := u.login(first, []byte(pass), false)
+	exp, err := u.login(first, []byte(pass), 0)
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestLiveUnlockAndLock(t *testing.T) {
 
 	// Remember the password: a renewal is a new token from the derived key,
 	// with no password; Lock forgets it and nothing is renewed after that.
-	exp, err = u.login(first, []byte(pass), true)
+	exp, err = u.login(first, []byte(pass), keepUntilLock)
 	if err != nil {
 		t.Fatalf("login (remember): %v", err)
 	}

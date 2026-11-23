@@ -39,10 +39,30 @@ import (
 )
 
 const (
-	appID        = "com.encedo.hem-ssh-agent"
-	windowTitle  = "HEM SSH agent"
+	appID       = "com.encedo.hem-ssh-agent"
+	windowTitle = "HEM SSH agent"
+	// prefRemember: the old check box (true = until Lock), read once when
+	// prefKeepFor is not set yet.
 	prefRemember = "remember"
+	// prefKeepFor: how long the password is remembered, seconds; 0 = not at
+	// all, keepUntilLock = until Lock.
+	prefKeepFor = "keep_for"
 )
+
+// keepUntilLock: remember the password until Lock (no time limit).
+const keepUntilLock = -1 * time.Second
+
+// keepChoices: the remember options of the window, in the order shown.
+var keepChoices = []struct {
+	label string
+	d     time.Duration
+}{
+	{"Do not remember the password", 0},
+	{"Remember the password for 15 minutes", 15 * time.Minute},
+	{"Remember the password for 1 hour", time.Hour},
+	{"Remember the password for 4 hours", 4 * time.Hour},
+	{"Remember the password until Lock", keepUntilLock},
+}
 
 //go:embed icon.svg
 var iconSVG []byte
@@ -62,15 +82,22 @@ type ui struct {
 	started bool   // this window has tried to start the agent
 
 	// Remember the password: the client holding the derived key, and the
-	// renewal timer. keep is nil unless the person chose it.
-	keep     *hem.Client
-	renewAt  int64
-	timer    *time.Timer
-	failing  bool
-	handOver sync.Mutex // a token hand-over and Lock never interleave
+	// renewal timer. keep is nil unless the person chose it. keepUntil: when
+	// the remembering ends by itself (zero: at Lock); keepTimer ends it then.
+	keep      *hem.Client
+	keepUntil time.Time
+	keepTimer *time.Timer
+	renewAt   int64
+	timer     *time.Timer
+	failing   bool
+	handOver  sync.Mutex // a token hand-over and Lock never interleave
+
+	// noGL: no OpenGL here (a virtual machine without 3D, some remote
+	// desktops) - Fyne cannot open a window, so none is ever shown.
+	noGL bool
 
 	pass     *widget.Entry
-	remember *widget.Check
+	remember *widget.Select
 	info     *widget.Label
 	unlock   *widget.Button
 	lockBtn  *widget.Button
@@ -93,12 +120,15 @@ func main() {
 		os.Exit(2)
 	}
 	alignScaleWithDesktop()
+	// Before Fyne starts: a window Fyne cannot create ends the whole process
+	// (os.Exit in its driver), tray and all.
+	noGL := !openGLAvailable()
 
 	a := app.NewWithID(appID)
 	a.Settings().SetTheme(th)
 	icon := fyne.NewStaticResource("icon.svg", iconSVG)
 	a.SetIcon(icon)
-	u := &ui{app: a, control: *control}
+	u := &ui{app: a, control: *control, noGL: noGL}
 	if !*noStart {
 		u.agentArgs = agentArgs(*config, *control)
 	}
@@ -113,19 +143,44 @@ func main() {
 		}
 	}
 
-	tray := false
-	if desk, ok := a.(desktop.App); ok && trayAvailable() {
-		u.desk, tray = desk, true
-	}
-	u.build(tray)
-	if tray {
-		u.desk.SetSystemTrayIcon(icon)
-		u.renderMenu()
+	desk, hasDesk := a.(desktop.App)
+	u.build()
+	if hasDesk && trayAvailable() {
+		u.useTray(desk, icon)
 	} else {
 		u.present() // no tray: the window is the only way in
+		if hasDesk {
+			go u.waitForTray(desk, icon)
+		}
+	}
+	if noGL {
+		u.notify("No window", noWindowHelp)
 	}
 	go u.follow()
 	a.Run()
+}
+
+const noWindowHelp = "This computer has no OpenGL (a virtual machine without 3D acceleration, " +
+	"some remote desktops), so the window cannot open. The tray menu works; unlock with " +
+	"ssh-add -X in a terminal (it asks for the HEM password)."
+
+func (u *ui) useTray(desk desktop.App, icon fyne.Resource) {
+	u.desk = desk
+	u.desk.SetSystemTrayIcon(icon)
+	u.renderMenu()
+}
+
+// waitForTray: a tray host that registers after this window started (a
+// login autostart racing the desktop) still gets the icon - asked every few
+// seconds for two minutes. Until then the window is the way in.
+func (u *ui) waitForTray(desk desktop.App, icon fyne.Resource) {
+	for range 40 {
+		time.Sleep(3 * time.Second)
+		if trayAvailable() {
+			fyne.Do(func() { u.useTray(desk, icon) })
+			return
+		}
+	}
 }
 
 // agentArgs: `[--config FILE] run [--control ADDR]`; the control address
@@ -148,17 +203,21 @@ func agentArgs(config, control string) []string {
 }
 
 // build makes the unlock window. With a tray it is shown from the tray and
-// hidden, not closed, so the application keeps running; without one it is
-// the application.
-func (u *ui) build(tray bool) {
+// hidden, not closed, so the application keeps running; without one (yet) it
+// is the application (closeWindow).
+func (u *ui) build() {
 	u.win = u.app.NewWindow(windowTitle)
 	u.pass = widget.NewPasswordEntry()
 	u.pass.SetPlaceHolder("HEM password")
-	u.remember = widget.NewCheck("Remember the password until Lock", func(on bool) {
-		u.app.Preferences().SetBool(prefRemember, on)
+	labels := make([]string, len(keepChoices))
+	for i, c := range keepChoices {
+		labels[i] = c.label
+	}
+	u.remember = widget.NewSelect(labels, func(label string) {
+		u.app.Preferences().SetInt(prefKeepFor, int(keepFor(label)/time.Second))
 	})
-	u.remember.SetChecked(u.app.Preferences().BoolWithFallback(prefRemember, false))
-	hint := widget.NewLabel("Keeps the key derived from it in this window and renews the agent's token by itself. Off: unlock again when the token expires.")
+	u.remember.SetSelected(keepLabel(u.savedKeepFor()))
+	hint := widget.NewLabel("Remembering keeps the key derived from the password in this window and renews the agent's token by itself until the time is up. Otherwise unlock again when the token expires.")
 	hint.Wrapping = fyne.TextWrapWord
 	hint.Importance = widget.LowImportance
 	u.info = widget.NewLabel("")
@@ -170,14 +229,45 @@ func (u *ui) build(tray bool) {
 	u.win.SetContent(container.NewVBox(u.info, u.pass, u.remember, hint,
 		container.NewGridWithColumns(2, u.lockBtn, u.unlock)))
 	u.win.Resize(fyne.NewSize(400, 0))
-	if tray {
-		u.win.SetCloseIntercept(u.closeWindow)
-	} else {
-		u.win.SetMaster()
+	u.win.SetCloseIntercept(u.closeWindow)
+}
+
+// savedKeepFor: the remember choice from the preferences; the old check box
+// (until Lock) when there is none yet.
+func (u *ui) savedKeepFor() time.Duration {
+	p := u.app.Preferences()
+	if s := p.IntWithFallback(prefKeepFor, -2); s != -2 {
+		return time.Duration(s) * time.Second
 	}
+	if p.BoolWithFallback(prefRemember, false) {
+		return keepUntilLock
+	}
+	return 0
+}
+
+func keepFor(label string) time.Duration {
+	for _, c := range keepChoices {
+		if c.label == label {
+			return c.d
+		}
+	}
+	return 0
+}
+
+func keepLabel(d time.Duration) string {
+	for _, c := range keepChoices {
+		if c.d == d {
+			return c.label
+		}
+	}
+	return keepChoices[0].label
 }
 
 func (u *ui) present() {
+	if u.noGL {
+		u.notify("No window", noWindowHelp)
+		return
+	}
 	u.renderWindow()
 	// Centred - otherwise left to the window manager. A no-op on native
 	// Wayland, where the window cannot place or raise itself (gui/README.md).
@@ -342,6 +432,9 @@ func (u *ui) scheduleRenew(at int64) {
 	if u.keep == nil || u.renewAt == at {
 		return
 	}
+	if !u.keepUntil.IsZero() && !time.Unix(at, 0).Before(u.keepUntil) {
+		return // the remembered time ends first (keepTimer)
+	}
 	u.renewAt = at
 	if u.timer != nil {
 		u.timer.Stop()
@@ -389,10 +482,14 @@ func (u *ui) renew() {
 func (u *ui) forget() {
 	u.mu.Lock()
 	c := u.keep
-	u.keep, u.renewAt, u.failing = nil, 0, false
+	u.keep, u.renewAt, u.failing, u.keepUntil = nil, 0, false, time.Time{}
 	if u.timer != nil {
 		u.timer.Stop()
 		u.timer = nil
+	}
+	if u.keepTimer != nil {
+		u.keepTimer.Stop()
+		u.keepTimer = nil
 	}
 	u.mu.Unlock()
 	if c != nil {
@@ -447,15 +544,48 @@ func (u *ui) stateLine() string {
 		return "Waiting for the phone"
 	case s.State == "locked":
 		return "Locked"
-	case s.ExpiresAt > 0 && u.remembering():
-		return "Ready - the password is remembered"
 	case s.ExpiresAt > 0:
-		return "Ready until " + time.Unix(s.ExpiresAt, 0).Format("15:04")
+		return "Ready until " + time.Unix(s.ExpiresAt, 0).Format("15:04") + u.tokenOrigin(s)
+	case s.Kept:
+		return "Ready - the password is kept until Lock"
+	case u.remembering():
+		return "Ready - the password is remembered " + u.rememberedUntil()
 	case s.Auth == "remote" || s.Auth == "remote+password":
 		return "Ready - the phone approves"
 	default:
 		return "Ready"
 	}
+}
+
+// tokenOrigin: where the token came from and what comes after it, for the
+// state line.
+func (u *ui) tokenOrigin(s Status) string {
+	switch {
+	case u.remembering():
+		return " (password, renewed " + u.rememberedUntil() + ")"
+	case s.Kept:
+		return " (password, kept until Lock)"
+	case s.Source != "":
+		return " (" + s.Source + ")"
+	}
+	return ""
+}
+
+// rememberedUntil: "until Lock" or "until 15:04", the end of the remembering.
+func (u *ui) rememberedUntil() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.keepUntil.IsZero() {
+		return "until Lock"
+	}
+	return "until " + u.keepUntil.Format("15:04")
+}
+
+// canLock: Lock does something now - a token, a wait for the phone or the
+// password, a derived key the agent keeps, or a password this window
+// remembers. In the phone modes the agent is "ready" without any of them.
+func (u *ui) canLock(s Status, seen bool) bool {
+	return seen && (s.ExpiresAt > 0 || s.Pending != nil || s.Kept || u.remembering())
 }
 
 func (u *ui) renderMenu() {
@@ -477,8 +607,9 @@ func (u *ui) renderMenu() {
 	// Like Lock, only when it does something: not while unlocked.
 	unlock.Disabled = !seen || !canUnlock(s)
 	lock := fyne.NewMenuItem("Lock", u.onLock)
-	lock.Disabled = !seen || (s.State == "locked" && !u.remembering())
-	items = append(items, unlock, lock, fyne.NewMenuItem("Show log", u.onLog))
+	lock.Disabled = !u.canLock(s, seen)
+	// Show: the window at any time, also while unlocked (state, Lock).
+	items = append(items, unlock, lock, fyne.NewMenuItem("Show", u.present), fyne.NewMenuItem("Show log", u.onLog))
 	// Fyne adds Quit to a tray menu itself.
 	u.desk.SetSystemTrayMenu(fyne.NewMenu(windowTitle, items...))
 }
@@ -505,7 +636,7 @@ func (u *ui) renderWindow() {
 		u.pass.Disable()
 		u.remember.Disable()
 	}
-	if seen && (s.State != "locked" || u.remembering()) {
+	if u.canLock(s, seen) {
 		u.lockBtn.Enable()
 	} else {
 		u.lockBtn.Disable()
@@ -518,12 +649,12 @@ func (u *ui) onUnlock() {
 		return
 	}
 	pass := []byte(u.pass.Text)
-	remember := u.remember.Checked
+	keep := keepFor(u.remember.Selected)
 	u.pass.SetText("")
 	u.unlock.Disable()
 	u.info.SetText("Logging in to the HEM...")
 	go func() {
-		exp, err := u.login(s, pass, remember)
+		exp, err := u.login(s, pass, keep)
 		fyne.Do(func() {
 			if err != nil {
 				u.renderWindow()
@@ -531,8 +662,8 @@ func (u *ui) onUnlock() {
 				return
 			}
 			u.win.Hide()
-			if remember {
-				u.notify("Unlocked", "Signing until Lock; the token is renewed by this window.")
+			if keep != 0 {
+				u.notify("Unlocked", "Signing "+u.rememberedUntil()+"; the token is renewed by this window.")
 			} else {
 				u.notify("Unlocked", "Signing until "+exp.Format("15:04"))
 			}
@@ -540,10 +671,13 @@ func (u *ui) onUnlock() {
 	}()
 }
 
-// login gets a token for every key the agent serves and hands it over. Unless
-// remember is set the derived key is dropped at once and nothing here can
-// mint another.
-func (u *ui) login(s Status, pass []byte, remember bool) (time.Time, error) {
+// login gets a token for every key the agent serves and hands it over. With
+// keep 0 the derived key is dropped at once and nothing here can mint
+// another; otherwise it is kept for keep (keepUntilLock: until Lock) and the
+// token renewed meanwhile. When that time is up the window forgets it and
+// stops renewing: the last token runs out, then the agent asks again (the
+// phone, or the password).
+func (u *ui) login(s Status, pass []byte, keep time.Duration) (time.Time, error) {
 	defer clear(pass)
 	if s.URL == "" || len(s.Keys) == 0 {
 		return time.Time{}, errors.New("the agent did not say which HEM or keys")
@@ -552,15 +686,36 @@ func (u *ui) login(s Status, pass []byte, remember bool) (time.Time, error) {
 	c := hem.NewClient(s.URL, hem.Config{DisableTokenCache: true})
 	u.forget() // a new login replaces whatever was remembered
 	exp, err := u.handOverToken(c, s, pass)
-	if err != nil || !remember {
+	if err != nil || keep == 0 {
 		c.ClearKeys()
 		return exp, err
 	}
 	u.mu.Lock()
 	u.keep = c
+	if keep > 0 {
+		u.keepUntil = time.Now().Add(keep)
+		u.keepTimer = time.AfterFunc(keep, func() { u.keepEnded(c) })
+	}
 	u.mu.Unlock()
 	u.scheduleRenew(exp.Unix() - renewMargin(s.TTL))
 	return exp, nil
+}
+
+// keepEnded: the remembered time is up - forget the password (the token
+// handed over last runs out by itself).
+func (u *ui) keepEnded(c *hem.Client) {
+	u.mu.Lock()
+	still := u.keep == c
+	u.mu.Unlock()
+	if !still {
+		return
+	}
+	u.forget()
+	u.do(func() {
+		u.notify("Password forgotten", "The remembered time is over. When the current token runs out the agent asks again.")
+		u.renderMenu()
+		u.renderWindow()
+	})
 }
 
 var errForgotten = errors.New("the remembered password was forgotten meanwhile")
@@ -620,10 +775,15 @@ func (u *ui) onUsePassword() {
 	}()
 }
 
-// closeWindow: hidden, not closed (the tray keeps the application). Closed
+// closeWindow: hidden, not closed (the tray keeps the application); without a
+// tray (yet) the window is the application and closing it quits. Closed
 // while a sign waits for the password: that sign ends unsigned at once, as
 // with Lock, instead of waiting out its time.
 func (u *ui) closeWindow() {
+	if u.desk == nil {
+		u.app.Quit()
+		return
+	}
 	u.win.Hide()
 	if s, seen, _ := u.snapshot(); seen && s.Pending != nil && s.Pending.Password {
 		u.onLock()

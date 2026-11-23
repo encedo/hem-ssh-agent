@@ -136,7 +136,9 @@ The snapshot (`Status`): `state` (`locked` / `ready` / `waiting` for the
 phone or the password), `auth` (`password` / `remote` / `remote+password`),
 `url` (the HEM the window logs in to), `ttl` (when the password may be used:
 the lifetime to ask for), `keys` (kid, comment), `expires_at` (unix seconds, read from
-the token), `pending` (the note on the phone, since when, and `password`
+the token), `source` (with `expires_at`: where the token came from, `phone` or
+`password`), `kept` (the derived key is kept, `ssh-add -X`: tokens without the
+phone until Lock), `pending` (the note on the phone, since when, and `password`
 once *Use password* was chosen), `last` (the
 last sign's note, `signed` / `denied` / `timeout` / `locked` / `failed`, and
 when). A whole snapshot every time, never a delta.

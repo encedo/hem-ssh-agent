@@ -159,6 +159,14 @@ pub struct Status {
     /// The current token's `exp` (unix seconds), read from the token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
+    /// Where the current token came from: `phone` or `password` (the
+    /// window's login, or the kept derived key). Set with `expires_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The derived key is kept (`ssh-add -X`, `run --login`): new tokens
+    /// come from it, without the phone, until Lock.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept: bool,
     /// The approval the phone is showing now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<Pending>,
@@ -364,6 +372,8 @@ mod tests {
                 ttl: None,
                 keys: vec![KeyInfo { kid: "00".into(), comment: "c".into() }],
                 expires_at: None,
+                source: None,
+                kept: false,
                 pending: None,
                 last: None,
             },

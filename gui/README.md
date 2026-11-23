@@ -11,22 +11,34 @@ What it does:
 - Starts the agent when it is not running (beside the window:
   `hem-ssh-agentw.exe` on Windows, `hem-ssh-agent` on unix, else from PATH),
   detached; `-no-start` turns that off, `-config` is passed on.
-- Shows the agent's state in the tray menu: locked, ready (until when),
-  waiting for the phone; or that the agent is not running (*Start the agent*).
+- Shows the agent's state in the tray menu: locked, ready (until when, and
+  where the token came from: the phone, the password, the password renewed or
+  kept until Lock), waiting for the phone; or that the agent is not running
+  (*Start the agent*). *Lock* is offered only when there is something to lock;
+  *Show* opens the window at any time.
 - Notifies when the phone is asked to approve a token (with the note it
   shows) and how that ended: approved, refused, no answer.
 - Password mode: *Unlock...* asks for the HEM password, logs in to the HEM
   itself (check-in first, then a token for every key the agent serves) and
   hands the agent only the token. By default the derived key is dropped at
-  once; *Remember the password until Lock* keeps it in this window and hands
-  over a fresh token before each expires, until Lock, `ssh-add -x` or Quit.
+  once; the remember choice (15 minutes, 1 hour, 4 hours, or until Lock; the
+  last choice is kept) keeps it in this window and hands over a fresh token
+  before each expires, until the time is up, Lock, `ssh-add -x` or Quit. When
+  the time is up the last token runs out and the agent asks again (the
+  phone, or the password).
 - `auth = "remote+password"`: the phone first; while it is asked the tray
   menu offers *Use password*, which stops asking the phone and opens the
   Unlock window - the waiting `ssh` / `git` sign takes the token it hands
   over; closing the window ends that sign unsigned. *Unlock...* also works
   beforehand, while there is no token.
-- *Lock*, *Show log*, *Quit*. Without a tray (GNOME without an extension)
-  the window stays open and closing it quits.
+- *Lock*, *Show*, *Show log*, *Quit*. Without a tray (GNOME without an
+  extension) the window stays open and closing it quits; a tray host that
+  registers later (a login autostart racing the desktop) still gets the
+  icon - asked for two minutes.
+- Windows without OpenGL 2.1 (a virtual machine without 3D acceleration,
+  some remote desktops): Fyne cannot open a window, so the window checks
+  before it starts and then never opens one - the tray menu works, *Unlock...*
+  and *Use password* say to use `ssh-add -X` in a terminal instead.
 
 Flags: `-control`, `-config`, `-no-start`, `-theme auto|dark|light`, `-version`.
 
