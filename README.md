@@ -29,9 +29,9 @@ The configuration (below) is made first; the installers never write it.
 
 The tray window shows the agent's state and the phone's requests; in
 password mode *Unlock...* logs in to the HEM and hands the agent a token.
-*Remember the password until Lock* (off by default) keeps the key derived
-from it in the window, which then renews the token by itself; off, unlock
-again when the token expires.
+*Remember the password until Lock* (off by default) keeps a session secret
+made from it in the window (a HEM restart ends it), which then renews the
+token by itself; off, unlock again when the token expires.
 
 Built on [hem-sdk-rust](https://github.com/encedo/hem-sdk-rust).
 

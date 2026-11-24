@@ -4,7 +4,7 @@ package main
 //
 // Framing and message shape come from encedo-wg-hsm internal/ipc (MIT, same
 // author): a four-byte big-endian length, then JSON, at most 64 KiB. What the
-// window sends is a token and nothing else - no passphrase, no derived key; the
+// window sends is a token and nothing else - no passphrase, no session secret; the
 // agent refuses any field it does not know.
 
 import (
@@ -53,7 +53,7 @@ type Status struct {
 	ExpiresAt int64     `json:"expires_at,omitempty"`
 	// Where the current token came from: phone | password (with ExpiresAt).
 	Source string `json:"source,omitempty"`
-	// The agent keeps the derived key (ssh-add -X): tokens without the phone
+	// The agent keeps the session secret (ssh-add -X): tokens without the phone
 	// until Lock.
 	Kept    bool     `json:"kept,omitempty"`
 	Pending *Pending `json:"pending,omitempty"`

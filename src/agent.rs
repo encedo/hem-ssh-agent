@@ -62,14 +62,14 @@ pub async fn load_key(hem: &Hem, token: &str, kid: &str) -> hem_sdk::Result<Agen
 #[derive(Clone, Debug)]
 pub enum Auth {
     /// The HEM password, given once to unlock (`ssh-add -X`, or `run --login`).
-    /// The derived key is kept until `ssh-add -x`, and mints a token of
+    /// The session secret is kept until `ssh-add -x`, and mints a token of
     /// `ttl` seconds whenever the last one has expired.
     Password { ttl: u32 },
     /// The paired phone approves each token (lifetime = the phone's answer).
     /// `timeout`: how long to wait for the phone. `password: Some(ttl)`
     /// (`auth = "remote+password"`): the HEM password as the fallback - "Use
     /// password" while the phone is asked stops asking it and waits up to
-    /// `timeout` for the window's token; `ssh-add -X` keeps the derived key
+    /// `timeout` for the window's token; `ssh-add -X` keeps the session secret
     /// until Lock, as password mode does. `None`: no password on this computer.
     Remote { uv: Option<Uv>, timeout: std::time::Duration, password: Option<u32> },
 }
@@ -83,7 +83,7 @@ enum Got {
 
 #[derive(Default)]
 struct State {
-    /// The derived key is in `Hem` (`ssh-add -X`, `run --login`).
+    /// The session secret is in `Hem` (`ssh-add -X`, `run --login`).
     unlocked: bool,
     /// "Use password" during a phone wait: the phone is no longer asked; the
     /// waiting signs take the next token handed over, until this deadline
@@ -95,7 +95,7 @@ struct State {
     /// lifetime needs no check-in, no device login and no phone.
     token: Option<(String, i64)>,
     /// Where `token` came from: "phone" or "password" (the window's login or
-    /// the kept derived key) - shown in the status.
+    /// the kept session secret) - shown in the status.
     source: &'static str,
     /// Kids whose configured public key was compared with the HEM's.
     verified: HashSet<String>,
@@ -307,7 +307,7 @@ impl HemAgent {
         Ok(())
     }
 
-    /// Log in to the HEM with the password and keep the derived key (password
+    /// Log in to the HEM with the password and keep the session secret (password
     /// mode; remote mode with the password as the fallback: until Lock, the
     /// phone is not asked).
     pub async fn unlock_with_password(&self, password: &str) -> hem_sdk::Result<()> {
@@ -338,7 +338,7 @@ impl HemAgent {
         Ok(())
     }
 
-    /// Drop the derived key and every token: the next sign needs the password
+    /// Drop the session secret and every token: the next sign needs the password
     /// (password mode) or a new approval on the phone (remote mode). A phone
     /// or password wait in progress ends unsigned.
     pub async fn lock(&self) {
@@ -355,7 +355,7 @@ impl HemAgent {
         log::info!("locked");
     }
 
-    /// Password mode with neither the derived key (`ssh-add -X`) nor a valid
+    /// Password mode with neither the session secret (`ssh-add -X`) nor a valid
     /// token (from the window): no keys listed, as a locked OpenSSH agent.
     async fn locked(&self) -> bool {
         if !self.password_mode() {
@@ -383,7 +383,7 @@ impl HemAgent {
             return Ok(st.token.as_ref().expect("valid").0.clone());
         }
         let token = match &self.auth {
-            // The derived key is kept (ssh-add -X, run --login): password
+            // The session secret is kept (ssh-add -X, run --login): password
             // mode, or remote mode whose password was chosen until Lock.
             Auth::Password { ttl } | Auth::Remote { password: Some(ttl), .. } if st.unlocked => {
                 if let Err(e) = self.hem.hem_checkin().await {

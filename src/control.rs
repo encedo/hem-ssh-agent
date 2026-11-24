@@ -6,7 +6,7 @@
 //! the agent's own (the current user and SYSTEM / mode 0600).
 //!
 //! What crosses is a scoped, expiring token and nothing else - never the
-//! password, never the derived key. The window logs in to the HEM itself and
+//! password, never the session secret. The window logs in to the HEM itself and
 //! hands the agent the token; when it expires, new signs fail until the window
 //! (or `ssh-add -X`) hands over another. `Request` refuses unknown fields, so
 //! the rule holds even when a field would be convenient.
@@ -39,7 +39,7 @@ pub enum Op {
     Watch,
     /// Use this token for signing (password mode: the window logged in).
     Token,
-    /// Drop the token (and the derived key of `ssh-add -X`).
+    /// Drop the token (and the session secret of `ssh-add -X`).
     Lock,
     /// "Use password" (`auth = "remote+password"`): stop asking the phone;
     /// the waiting signs take the token the window hands over next.
@@ -144,7 +144,7 @@ impl Reply {
 /// cannot show a state that was never true.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Status {
-    /// `locked` (password mode, no token and no derived key), `ready`, or
+    /// `locked` (password mode, no token and no session secret), `ready`, or
     /// `waiting` (a token is being approved on the phone).
     pub state: String,
     /// `password`, `remote` or `remote+password` (the configuration's `auth`).
@@ -160,10 +160,10 @@ pub struct Status {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
     /// Where the current token came from: `phone` or `password` (the
-    /// window's login, or the kept derived key). Set with `expires_at`.
+    /// window's login, or the kept session secret). Set with `expires_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// The derived key is kept (`ssh-add -X`, `run --login`): new tokens
+    /// The session secret is kept (`ssh-add -X`, `run --login`): new tokens
     /// come from it, without the phone, until Lock.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kept: bool,

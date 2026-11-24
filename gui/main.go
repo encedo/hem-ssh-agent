@@ -5,7 +5,8 @@
 // password mode logs in to the HEM itself and hands the agent only a token.
 // By default it keeps nothing: when the token expires new signs fail until it
 // is unlocked again. "Remember the password" is the person's choice: the
-// window then keeps the key derived from the password (never the password)
+// window then keeps the per-boot session secret made from the password and
+// the HEM's spk (never the password; a HEM restart ends it)
 // in memory and hands the agent a fresh token before each one expires, until
 // Lock, an `ssh-add -x`, or Quit (docs/DESIGN.md, control channel).
 //
@@ -89,7 +90,7 @@ type ui struct {
 	down    string // why the agent cannot be reached, "" when it can
 	started bool   // this window has tried to start the agent
 
-	// Remember the password: the client holding the derived key, and the
+	// Remember the password: the client holding the session secret, and the
 	// renewal timer. keep is nil unless the person chose it. keepUntil: when
 	// the remembering ends by itself (zero: at Lock); keepTimer ends it then.
 	keep      *hem.Client
@@ -232,7 +233,7 @@ func (u *ui) build() {
 		u.app.Preferences().SetInt(prefKeepFor, int(keepFor(label)/time.Second))
 	})
 	u.remember.SetSelected(keepLabel(u.savedKeepFor()))
-	hint := widget.NewLabel("Remembering keeps the key derived from the password in this window and renews the agent's token by itself until the time is up. Otherwise unlock again when the token expires.")
+	hint := widget.NewLabel("Remembering keeps a session secret made from the password in this window (a HEM restart ends it) and renews the agent's token by itself until the time is up. Otherwise unlock again when the token expires.")
 	hint.Wrapping = fyne.TextWrapWord
 	hint.Importance = widget.LowImportance
 	u.info = widget.NewLabel("")
@@ -410,7 +411,7 @@ func (u *ui) apply(s Status) {
 // keepUp keeps the agent unlocked while the password is remembered: a
 // renewal before each token expires, at once after an expiry or an agent
 // restart. A lock before the token ran out (ssh-add -x, another window) is
-// taken as meant: the derived key is dropped. Reports whether it is still
+// taken as meant: the session secret is dropped. Reports whether it is still
 // remembered.
 func (u *ui) keepUp(prev Status, had bool, s Status) bool {
 	if !u.remembering() {
@@ -605,7 +606,7 @@ func (u *ui) rememberedUntil() string {
 }
 
 // canLock: Lock does something now - a token, a wait for the phone or the
-// password, a derived key the agent keeps, or a password this window
+// password, a session secret the agent keeps, or a password this window
 // remembers. In the phone modes the agent is "ready" without any of them.
 func (u *ui) canLock(s Status, seen bool) bool {
 	return seen && (s.ExpiresAt > 0 || s.Pending != nil || s.Kept || u.remembering())
@@ -703,7 +704,7 @@ func (u *ui) onUnlock() {
 }
 
 // login gets a token for every key the agent serves and hands it over. With
-// keep 0 the derived key is dropped at once and nothing here can mint
+// keep 0 the session secret is dropped at once and nothing here can mint
 // another; otherwise it is kept for keep (keepUntilLock: until Lock) and the
 // token renewed meanwhile. When that time is up the window forgets it and
 // stops renewing: the last token runs out, then the agent asks again (the

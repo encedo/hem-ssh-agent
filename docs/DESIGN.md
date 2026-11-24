@@ -66,9 +66,11 @@ Two ways to get one, both from hem-sdk-rust:
 - **Password** (`auth = "password"`, `authorize_password`): the agent starts
   **locked** (no keys listed, as a locked OpenSSH agent). `ssh-add -X` sends
   the HEM password over the agent socket / pipe (OpenSSH's own prompt, no UI
-  of ours); the agent keeps the derived X25519 key (not the password) and
+  of ours); the agent keeps the per-boot session secret
+  `K_s = X25519(user_sk, spk)` (DEV-532: not the password, not the key derived
+  from it; a HEM restart ends it) and
   mints a token of `ttl` seconds whenever the last one has expired.
-  `ssh-add -x` drops the derived key and the token (the lock passphrase is
+  `ssh-add -x` drops the session secret and the token (the lock passphrase is
   not used). `run --login` asks on the terminal instead. Works air-gapped.
 - **Phone approval** (`auth = "remote"`, `authorize_remote`, broker +
   encedo-authenticator): no password on the computer. When a sign needs a
@@ -93,8 +95,8 @@ Two ways to get one, both from hem-sdk-rust:
   `ttl`, phone tokens the phone's lifetime; after a password token expires
   the phone is asked again, unless *Remember the password until Lock* is on
   (the window keeps renewing) or `ssh-add -X` / `run --login` gave the agent
-  the derived key (until Lock). Keys are listed without a token, as in
-  `remote`.
+  the session secret (until Lock or a HEM restart). Keys are listed without
+  a token, as in `remote`.
 
 The note is read from the data to sign, nothing invented (`src/note.rs`):
 an SSH user-auth request (RFC 4252 section 7) gives
@@ -129,7 +131,7 @@ overrides it. The framing and message shape are encedo-wg-hsm
 | `{"op":"whoami"}` | `reply` with `build` and `who` (the caller's SID and pid on Windows, uid and pid on unix) |
 | `{"op":"watch"}` | `reply`, then an `event` snapshot now and on every change |
 | `{"op":"token","build":{...},"token":"..."}` | `reply` ok, or `kind` `build` / `invalid_arg` / a hem-sdk code |
-| `{"op":"lock"}` | `reply`; drops the token and the derived key |
+| `{"op":"lock"}` | `reply`; drops the token and the session secret |
 | `{"op":"use_password"}` | `reply`; `remote+password`: stops asking the phone, the waiting signs take the next token |
 
 The snapshot (`Status`): `state` (`locked` / `ready` / `waiting` for the
@@ -137,7 +139,7 @@ phone or the password), `auth` (`password` / `remote` / `remote+password`),
 `url` (the HEM the window logs in to), `ttl` (when the password may be used:
 the lifetime to ask for), `keys` (kid, comment), `expires_at` (unix seconds, read from
 the token), `source` (with `expires_at`: where the token came from, `phone` or
-`password`), `kept` (the derived key is kept, `ssh-add -X`: tokens without the
+`password`), `kept` (the session secret is kept, `ssh-add -X`: tokens without the
 phone until Lock), `pending` (the note on the phone, since when, and `password`
 once *Use password* was chosen), `last` (the
 last sign's note, `signed` / `denied` / `timeout` / `locked` / `failed`, and
@@ -147,14 +149,15 @@ when). A whole snapshot every time, never a delta.
 via hem-sdk-go, check-in first) and hands over a token holding
 `keymgmt:use:<kid>` for every served key; the agent checks `exp`, the
 scopes and, through the HEM, the configured public keys. No password and no
-derived key are ever sent (`Request` refuses unknown fields). When the token
+session secret are ever sent (`Request` refuses unknown fields). When the token
 expires, new signs fail until the window - or `ssh-add -X` - gives another;
 the agent has nothing to renew it with. A window from a different build is
 refused a `token` (`build` names both).
 
 **Remember the password** (a check box in the window, off by default, the
-person's choice, kept as a preference): the window then keeps the key
-derived from the password - never the password - in its own memory and
+person's choice, kept as a preference): the window then keeps the per-boot
+session secret made from the password - never the password, a HEM restart
+ends it - in its own memory and
 hands the agent a fresh token (check-in, no token cache) a fifth of the
 lifetime before each expires (10 s .. 1 min), at once after an agent
 restart. It forgets the key on Lock (tray or window), on a lock before the
@@ -208,8 +211,8 @@ just to list.
   dropped whatever `RUST_LOG` says (found on the Linux test, 2026-11-22).
 - Agent forwarding (`ssh -A`) lets a remote host ask for signatures while the
   session lasts - document it; optional confirm-per-sign.
-- The agent holds a derived key or a token in memory, never the password;
-  zeroized on drop. The window holds a derived key only while "Remember the
+- The agent holds a session secret or a token in memory, never the password;
+  zeroized on drop. The window holds a session secret only while "Remember the
   password" is on (above).
 - Pageant: any process on the desktop can send the window a message; only
   a mapping owned by this user is answered (PuTTY's check).

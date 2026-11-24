@@ -85,7 +85,7 @@ func TestLiveUnlockAndLock(t *testing.T) {
 		t.Fatalf("after lock: %+v", s)
 	}
 
-	// Remember the password: a renewal is a new token from the derived key,
+	// Remember the password: a renewal is a new token from the session secret,
 	// with no password; Lock forgets it and nothing is renewed after that.
 	exp, err = u.login(first, []byte(pass), keepUntilLock)
 	if err != nil {
