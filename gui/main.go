@@ -238,11 +238,15 @@ func (u *ui) build() {
 	hint.Importance = widget.LowImportance
 	u.info = widget.NewLabel("")
 	u.info.Wrapping = fyne.TextWrapWord
+	// The window never changes size (owner: constant width and height): the
+	// state and messages scroll inside a box of six lines.
+	infoBox := container.NewVScroll(u.info)
+	infoBox.SetMinSize(fyne.NewSize(0, widget.NewLabel("1\n2\n3\n4\n5\n6").MinSize().Height))
 	u.unlock = widget.NewButton("Unlock", u.onUnlock)
 	u.unlock.Importance = widget.HighImportance
 	u.lockBtn = widget.NewButton("Lock", u.onLock)
 	u.pass.OnSubmitted = func(string) { u.onUnlock() }
-	u.win.SetContent(container.NewVBox(u.info, u.pass, u.remember, hint,
+	u.win.SetContent(container.NewVBox(infoBox, u.pass, u.remember, hint,
 		container.NewGridWithColumns(2, u.lockBtn, u.unlock)))
 	u.win.SetFixedSize(true) // a small dialog: no maximise, no resize
 	u.win.Resize(fyne.NewSize(400, 0))
