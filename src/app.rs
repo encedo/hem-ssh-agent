@@ -277,7 +277,20 @@ async fn cli_token(hem: &Hem, cfg: Option<&Config>, scope: Vec<String>, what: &s
 }
 
 fn url(flag: Option<String>, cfg: Option<&Config>) -> Res<String> {
-    flag.or_else(|| cfg.map(|c| c.url.clone())).ok_or_else(|| "no HEM address: --url, HEM_URL or the configuration file".into())
+    let url = flag.or_else(|| cfg.map(|c| c.url.clone())).ok_or("no HEM address: --url, HEM_URL or the configuration file")?;
+    https_only(url)
+}
+
+// DEV-532: the HEM over https only, no opt-in. Over plain http the login and
+// the token it brings can be read on the way, and a token taken that way is no
+// use to an agent: plain http is the module's service mode (repairing its TLS),
+// which is the Manager's job, not this one's.
+fn https_only(url: String) -> Res<String> {
+    if url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) {
+        Ok(url)
+    } else {
+        Err(format!("the HEM address must start with https:// ({url})").into())
+    }
 }
 
 async fn keys(cfg: Option<Config>, url_flag: Option<String>) -> Res<()> {
@@ -318,7 +331,7 @@ async fn run(cfg: Config, login: bool, listen_flag: Option<String>, control_flag
     let listener = listen::bind(&address).await?;
     let control_listener = listen::bind(&control_address).await?;
 
-    let hem = Arc::new(Hem::new(&cfg.url, HemOptions::default())?);
+    let hem = Arc::new(Hem::new(&url(None, Some(&cfg))?, HemOptions::default())?);   // DEV-532: https only
     let timeout = std::time::Duration::from_secs(cfg.approve_timeout.into());
     let auth = match cfg.auth {
         AuthMode::Password => Auth::Password { ttl: cfg.ttl },
@@ -495,4 +508,18 @@ fn install(_config: Option<PathBuf>, _start: bool, _no_gui: bool) -> Res<()> {
 #[cfg(unix)]
 fn uninstall() -> Res<()> {
     Err("uninstall: on Linux and macOS use gui/linux/uninstall.sh or gui/macos/uninstall.sh".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::https_only;
+
+    #[test]
+    fn the_hem_only_over_https() {   // DEV-532
+        assert_eq!(https_only("https://my.ence.do".into()).unwrap(), "https://my.ence.do");
+        assert!(https_only("HTTPS://192.168.7.1".into()).is_ok(), "any case");
+        for bad in ["http://my.ence.do", "my.ence.do", "", "https:/x", "ftp://x"] {
+            assert!(https_only(bad.into()).is_err(), "{bad}");
+        }
+    }
 }

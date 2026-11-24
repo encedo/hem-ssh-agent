@@ -61,6 +61,7 @@ pub struct KeyConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// The HEM, `https://` only (DEV-532: the agent refuses plain http).
     pub url: String,
     #[serde(default)]
     pub auth: AuthMode,

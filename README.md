@@ -49,7 +49,7 @@ hem-ssh-agent pubkey --url https://my.ence.do --kid <kid> # line for config / au
 `~/.config/hem-ssh-agent/` (Linux, macOS):
 
 ```toml
-url  = "https://my.ence.do"
+url  = "https://my.ence.do"   # https:// only: plain http is refused
 auth = "remote"        # "password": unlock with `ssh-add -X`; "remote": approve on the phone;
                        # "remote+password": the phone first, the password when it is not at hand
                        # (Use password in the tray menu while the phone is asked, or ssh-add -X)
