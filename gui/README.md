@@ -14,8 +14,11 @@ What it does:
 - Shows the agent's state in the tray menu: locked, ready (until when, and
   where the token came from: the phone, the password, the password renewed or
   kept until Lock), waiting for the phone; or that the agent is not running
-  (*Start the agent*). *Lock* is offered only when there is something to lock;
-  *Show* opens the window at any time.
+  (*Start the agent*). One item follows the state: *Lock* while there is
+  something to lock (a token, a wait for the phone - it cancels it, a kept or
+  remembered secret), otherwise *Unlock...* when that does something; *Show*
+  opens the window at any time. The window keeps one size; what went wrong is
+  said in words (the raw error goes to stderr).
 - Notifies when the phone is asked to approve a token (with the note it
   shows) and how that ended: approved, refused, no answer.
 - Password mode: *Unlock...* asks for the HEM password, logs in to the HEM
@@ -27,11 +30,11 @@ What it does:
   the time is up the last token runs out and the agent asks again (the
   phone, or the password).
 - `auth = "remote+password"`: the phone first; while it is asked the tray
-  menu offers *Use password*, which stops asking the phone and opens the
+  menu offers *Use password...*, which stops asking the phone and opens the
   Unlock window - the waiting `ssh` / `git` sign takes the token it hands
   over; closing the window ends that sign unsigned. *Unlock...* also works
   beforehand, while there is no token.
-- *Lock*, *Show*, *Show log*, *Quit*. Without a tray (GNOME without an
+- *Lock* or *Unlock...*, *Show*, *Show log*, *Quit*. Without a tray (GNOME without an
   extension) the window stays open and closing it quits; a tray host that
   registers later (a login autostart racing the desktop) still gets the
   icon - asked for two minutes.
@@ -39,7 +42,7 @@ What it does:
   acceleration or with a broken 3D driver, some remote desktops): Fyne cannot
   open a window, so the window checks before it starts (a hidden window and
   one shader program, as Fyne makes them) and then never opens one - the tray
-  menu works, *Unlock...* and *Use password* say to use `ssh-add -X` in a
+  menu works, *Unlock...* and *Use password...* say to use `ssh-add -X` in a
   terminal instead.
 
 Flags: `-control`, `-config`, `-no-start`, `-theme auto|dark|light`, `-version`.

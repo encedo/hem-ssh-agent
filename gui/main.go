@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -68,6 +69,12 @@ var keepChoices = []struct {
 //go:embed icon.svg
 var iconSVG []byte
 
+// iconPNG: the window's own icon - a raster, since X11 window managers read
+// _NET_WM_ICON, which stayed empty with the SVG (Vostro, 2026-11-24).
+//
+//go:embed icon.png
+var iconPNG []byte
+
 type ui struct {
 	app  fyne.App
 	desk desktop.App
@@ -100,6 +107,9 @@ type ui struct {
 	timer     *time.Timer
 	failing   bool
 	handOver  sync.Mutex // a token hand-over and Lock never interleave
+	// expiry draws the state again when the token runs out: the agent sends no
+	// snapshot then (UI goroutine only).
+	expiry *time.Timer
 
 	// noGL: no OpenGL here (a virtual machine without 3D, some remote
 	// desktops) - Fyne cannot open a window, so none is ever shown.
@@ -108,8 +118,11 @@ type ui struct {
 	pass     *widget.Entry
 	remember *widget.Select
 	info     *widget.Label
-	unlock   *widget.Button
-	lockBtn  *widget.Button
+	// message: the outcome of the last Unlock, under the state; it replaces
+	// the one before and goes when the window is shown again (UI goroutine).
+	message string
+	unlock  *widget.Button
+	lockBtn *widget.Button
 }
 
 func main() {
@@ -223,6 +236,7 @@ func agentArgs(config, control string) []string {
 // is the application (closeWindow).
 func (u *ui) build() {
 	u.win = u.app.NewWindow(windowTitle)
+	u.win.SetIcon(fyne.NewStaticResource("icon.png", iconPNG))
 	u.pass = widget.NewPasswordEntry()
 	u.pass.SetPlaceHolder("HEM password")
 	labels := make([]string, len(keepChoices))
@@ -296,6 +310,7 @@ func (u *ui) present() {
 		// nil native window).
 		u.build()
 	}
+	u.message = ""
 	u.renderWindow()
 	// Centred - otherwise left to the window manager. A no-op on native
 	// Wayland, where the window cannot place or raise itself (gui/README.md).
@@ -320,8 +335,13 @@ func (u *ui) follow() {
 	for {
 		err := watch(context.Background(), u.control, func(s Status) { u.do(func() { u.apply(s) }) })
 		msg := "the agent is not running"
-		if err != nil && !isDialError(err) {
-			msg = err.Error()
+		var ar *agentRefused
+		if errors.As(err, &ar) && ar.kind == "build" {
+			log.Printf("hem-ssh-agent-gui: watch: %v", err)
+			msg = "the window and the agent are different versions - update both"
+		} else if err != nil && !isDialError(err) {
+			log.Printf("hem-ssh-agent-gui: watch: %v", err)
+			msg = "the connection to the agent was lost"
 		} else if u.agentArgs != nil {
 			u.mu.Lock()
 			first := !u.started
@@ -352,7 +372,10 @@ func (u *ui) startAgent() {
 		err = cmd.Start()
 	}
 	if err != nil {
-		u.do(func() { u.notify("The agent did not start", err.Error()) })
+		log.Printf("hem-ssh-agent-gui: starting the agent: %v", err)
+		u.do(func() {
+			u.notify("The agent did not start", "The agent program could not be started - is it installed next to this window?")
+		})
 		return
 	}
 	done := make(chan error, 1)
@@ -361,7 +384,8 @@ func (u *ui) startAgent() {
 		select {
 		case err := <-done:
 			if err != nil {
-				u.do(func() { u.notify("The agent stopped", err.Error()+"\nShow log says why.") })
+				log.Printf("hem-ssh-agent-gui: the agent stopped: %v", err)
+				u.do(func() { u.notify("The agent stopped", "It stopped at once - Show log says why.") })
 			}
 		case <-time.After(5 * time.Second):
 		}
@@ -408,8 +432,38 @@ func (u *ui) apply(s Status) {
 			u.notify("Locked", "The token has expired or the agent was locked. Unlock to sign again.")
 		}
 	}
+	u.watchExpiry(s.ExpiresAt)
 	u.renderMenu()
 	u.renderWindow()
+}
+
+// watchExpiry: one redraw just after the token's expiry (UI goroutine).
+func (u *ui) watchExpiry(at int64) {
+	if u.expiry != nil {
+		u.expiry.Stop()
+		u.expiry = nil
+	}
+	if at <= 0 {
+		return
+	}
+	u.expiry = time.AfterFunc(max(0, time.Until(time.Unix(at, 0)))+time.Second, func() {
+		u.do(func() {
+			u.renderMenu()
+			u.renderWindow()
+		})
+	})
+}
+
+// current: the snapshot as it stands now - a token past its expiry is gone
+// (the agent sends no snapshot when it runs out).
+func current(s Status) Status {
+	if s.ExpiresAt > 0 && time.Now().Unix() >= s.ExpiresAt {
+		s.ExpiresAt, s.Source = 0, ""
+		if s.Auth == "password" && s.State == "ready" {
+			s.State = "locked"
+		}
+	}
+	return s
 }
 
 // keepUp keeps the agent unlocked while the password is remembered: a
@@ -489,7 +543,11 @@ func (u *ui) renew() {
 		u.mu.Unlock()
 	case errors.As(err, &he) && he.Code == "auth_password_required":
 		u.forget()
-		u.do(func() { u.notify("Unlock again", "The HEM needs the password again.") })
+		u.do(func() {
+			u.notify("Unlock again", "The HEM needs the password again.")
+			u.renderMenu()
+			u.renderWindow()
+		})
 	case errors.Is(err, errForgotten):
 	default:
 		u.mu.Lock()
@@ -501,7 +559,8 @@ func (u *ui) renew() {
 		}
 		u.mu.Unlock()
 		if first {
-			u.do(func() { u.notify("Token not renewed", err.Error()+"\nTrying again every 30 s.") })
+			msg := humanError(err)
+			u.do(func() { u.notify("Token not renewed", msg+"\nTrying again every 30 s.") })
 		}
 	}
 }
@@ -556,7 +615,7 @@ func (u *ui) notify(title, body string) {
 func (u *ui) snapshot() (Status, bool, string) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.last, u.seen, u.down
+	return current(u.last), u.seen, u.down
 }
 
 func (u *ui) stateLine() string {
@@ -572,6 +631,9 @@ func (u *ui) stateLine() string {
 		return "Waiting for the phone"
 	case s.State == "locked":
 		return "Locked"
+	case s.ExpiresAt > 0 && u.remembering():
+		// Renewed by this window: only the end of the remembering counts.
+		return "Ready " + u.rememberedUntil() + " (password)"
 	case s.ExpiresAt > 0:
 		return "Ready until " + time.Unix(s.ExpiresAt, 0).Format("15:04") + u.tokenOrigin(s)
 	case s.Kept:
@@ -589,8 +651,6 @@ func (u *ui) stateLine() string {
 // state line.
 func (u *ui) tokenOrigin(s Status) string {
 	switch {
-	case u.remembering():
-		return " (password, renewed " + u.rememberedUntil() + ")"
 	case s.Kept:
 		return " (password, kept until Lock)"
 	case s.Source != "":
@@ -629,15 +689,19 @@ func (u *ui) renderMenu() {
 	}
 	if seen && s.Auth == "remote+password" && s.Pending != nil && !s.Pending.Password {
 		// No phone at hand: stop asking it, unlock with the password instead.
-		items = append(items, fyne.NewMenuItem("Use password", u.onUsePassword))
+		items = append(items, fyne.NewMenuItem("Use password...", u.onUsePassword))
 	}
-	unlock := fyne.NewMenuItem("Unlock...", u.present)
-	// Like Lock, only when it does something: not while unlocked.
-	unlock.Disabled = !seen || !canUnlock(s)
-	lock := fyne.NewMenuItem("Lock", u.onLock)
-	lock.Disabled = !u.canLock(s, seen)
+	// One item that follows the state (owner): Lock while there is something
+	// to lock - a token, a wait (it cancels), a kept or remembered secret -
+	// otherwise Unlock... when that does something.
+	switch {
+	case u.canLock(s, seen):
+		items = append(items, fyne.NewMenuItem("Lock", u.onLock))
+	case seen && canUnlock(s):
+		items = append(items, fyne.NewMenuItem("Unlock...", u.present))
+	}
 	// Show: the window at any time, also while unlocked (state, Lock).
-	items = append(items, unlock, lock, fyne.NewMenuItem("Show", u.present), fyne.NewMenuItem("Show log", u.onLog))
+	items = append(items, fyne.NewMenuItem("Show", u.present), fyne.NewMenuItem("Show log", u.onLog))
 	// Fyne adds Quit only to the first tray menu it renders, not to the ones
 	// set later: so here, every time.
 	quit := fyne.NewMenuItem("Quit", u.app.Quit)
@@ -662,6 +726,9 @@ func (u *ui) renderWindow() {
 	for _, k := range s.Keys {
 		text += "\n• " + k.Comment
 	}
+	if u.message != "" {
+		text += "\n\n" + u.message
+	}
 	u.info.SetText(text)
 	if seen && canUnlock(s) {
 		u.unlock.Enable()
@@ -681,20 +748,26 @@ func (u *ui) renderWindow() {
 
 func (u *ui) onUnlock() {
 	s, seen, _ := u.snapshot()
-	if !seen || !passwordAllowed(s) || u.pass.Text == "" {
+	if !seen || !passwordAllowed(s) {
+		return // the button and the field are disabled then
+	}
+	if u.pass.Text == "" {
+		u.message = humanError(errNoPassword)
+		u.renderWindow()
 		return
 	}
 	pass := []byte(u.pass.Text)
 	keep := keepFor(u.remember.Selected)
 	u.pass.SetText("")
 	u.unlock.Disable()
+	u.message = ""
 	u.info.SetText("Logging in to the HEM...")
 	go func() {
 		exp, err := u.login(s, pass, keep)
 		fyne.Do(func() {
 			if err != nil {
+				u.message = "Not unlocked: " + humanError(err)
 				u.renderWindow()
-				u.info.SetText(u.info.Text + "\n\nNot unlocked: " + err.Error())
 				return
 			}
 			u.win.Hide()
@@ -786,12 +859,8 @@ func (u *ui) handOverToken(c *hem.Client, s Status, pass []byte) (time.Time, err
 			return time.Time{}, errForgotten
 		}
 	}
-	r, err := ask(ctx, u.control, Request{Op: "token", Build: currentBuild(), Token: tok})
-	if err != nil {
+	if _, err := ask(ctx, u.control, Request{Op: "token", Build: currentBuild(), Token: tok}); err != nil {
 		return time.Time{}, fmt.Errorf("handing the token to the agent: %w", err)
-	}
-	if !r.OK {
-		return time.Time{}, fmt.Errorf("the agent refused the token: %s", r.Err)
 	}
 	return hem.TokenExpiry(tok), nil
 }
@@ -804,9 +873,9 @@ func (u *ui) onUsePassword() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		r, err := ask(ctx, u.control, Request{Op: "use_password"})
-		if err != nil || !r.OK {
-			u.do(func() { u.notify("The phone is still asked", fmt.Sprint(err, r.Err)) })
+		if _, err := ask(ctx, u.control, Request{Op: "use_password"}); err != nil {
+			msg := humanError(err)
+			u.do(func() { u.notify("The phone is still asked", msg) })
 		}
 	}()
 }
@@ -834,9 +903,9 @@ func (u *ui) onLock() {
 		u.forget()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		r, err := ask(ctx, u.control, Request{Op: "lock"})
-		if err != nil || !r.OK {
-			u.do(func() { u.notify("Not locked", fmt.Sprint(err, r.Err)) })
+		if _, err := ask(ctx, u.control, Request{Op: "lock"}); err != nil {
+			msg := humanError(err)
+			u.do(func() { u.notify("Not locked", msg) })
 		}
 		u.do(func() {
 			u.renderMenu()

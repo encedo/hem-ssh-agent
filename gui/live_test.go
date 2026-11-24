@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -60,7 +61,8 @@ func TestLiveUnlockAndLock(t *testing.T) {
 
 	// A token of a different build is refused, naming the agent's.
 	r, err = ask(ctx, control, Request{Op: "token", Build: &Build{Release: "0.0.0+other"}, Token: "x.y.z"})
-	if err != nil || r.OK || r.Kind != "build" {
+	var ar *agentRefused
+	if !errors.As(err, &ar) || ar.kind != "build" || r.Kind != "build" {
 		t.Fatalf("other build: %v %+v", err, r)
 	}
 

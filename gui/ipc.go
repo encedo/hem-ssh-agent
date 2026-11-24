@@ -137,14 +137,22 @@ func readMsg(r io.Reader) (Msg, error) {
 	return m, json.Unmarshal(b, &m)
 }
 
-// ask sends one request on its own connection and returns the reply.
+// ask sends one request on its own connection and returns the reply; a
+// channel failure is a *controlError, an ok false answer an *agentRefused.
 func ask(ctx context.Context, path string, req Request) (Reply, error) {
 	c, err := dialControl(ctx, path)
 	if err != nil {
-		return Reply{}, err
+		return Reply{}, &controlError{err}
 	}
 	defer c.Close()
-	return roundTrip(c, req)
+	r, err := roundTrip(c, req)
+	if err != nil {
+		return Reply{}, &controlError{err}
+	}
+	if !r.OK {
+		return r, &agentRefused{kind: r.Kind, msg: r.Err}
+	}
+	return r, nil
 }
 
 func roundTrip(c net.Conn, req Request) (Reply, error) {
@@ -180,7 +188,7 @@ func watch(ctx context.Context, path string, fn func(Status)) error {
 		return fmt.Errorf("watch refused: %s", r.Err)
 	}
 	if r.Build != nil && r.Build.Release != version {
-		return fmt.Errorf("the agent is build %s, this window %s: update both", r.Build.Release, version)
+		return &agentRefused{kind: "build", msg: fmt.Sprintf("the agent is build %s, this window %s", r.Build.Release, version)}
 	}
 	for {
 		m, err := readMsg(c)
