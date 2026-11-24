@@ -70,6 +70,10 @@ var iconSVG []byte
 type ui struct {
 	app  fyne.App
 	desk desktop.App
+	// menu: the one tray menu for the whole run - Fyne keeps the first one it
+	// was given and renders it again when the tray registers, so only its
+	// items change.
+	menu *fyne.Menu
 	// trayUp: a tray host shows the icon, so closing the window hides it;
 	// without one closing the window quits (UI goroutine only).
 	trayUp bool
@@ -154,8 +158,6 @@ func main() {
 		// registers later picks the icon up by itself (systray re-registers
 		// with the watcher); trayAvailable only decides about the window.
 		u.useTray(desk, icon)
-		// Renders before the tray started may be lost: once more after.
-		a.Lifecycle().SetOnStarted(u.renderMenu)
 	}
 	if hasDesk && trayAvailable() {
 		u.trayUp = true
@@ -636,7 +638,11 @@ func (u *ui) renderMenu() {
 	quit := fyne.NewMenuItem("Quit", u.app.Quit)
 	quit.IsQuit = true
 	items = append(items, fyne.NewMenuItemSeparator(), quit)
-	u.desk.SetSystemTrayMenu(fyne.NewMenu(windowTitle, items...))
+	if u.menu == nil {
+		u.menu = fyne.NewMenu(windowTitle)
+	}
+	u.menu.Items = items
+	u.desk.SetSystemTrayMenu(u.menu)
 }
 
 func (u *ui) renderWindow() {
