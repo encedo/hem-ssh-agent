@@ -331,6 +331,7 @@ async fn pubkey(cfg: Option<Config>, url_flag: Option<String>, kid: String) -> R
     Ok(())
 }
 
+#[cfg(windows)] // only install() still needs the keys up front; run takes the window's choice
 fn agent_keys(cfg: &Config) -> Res<Vec<crate::AgentKey>> {
     let keys = cfg.keys.iter().map(|k| k.agent_key()).collect::<Result<Vec<_>, _>>()?;
     if keys.is_empty() || keys.len() > 8 {
