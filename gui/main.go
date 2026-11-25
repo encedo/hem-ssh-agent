@@ -264,7 +264,8 @@ func (u *ui) build() {
 	// state and messages scroll inside a box of six lines.
 	infoBox := container.NewVScroll(u.info)
 	infoBox.SetMinSize(fyne.NewSize(0, widget.NewLabel("1\n2\n3\n4\n5\n6").MinSize().Height))
-	u.unlock = widget.NewButton("Unlock", u.onUnlock)
+	// "with password": beside Unlock by phone, a bare "Unlock" was taken for the phone's
+	u.unlock = widget.NewButton("Unlock with password", u.onUnlock)
 	u.unlock.Importance = widget.HighImportance
 	u.lockBtn = widget.NewButton("Lock", u.onLock)
 	// Enter: Unlock, or - not set up yet - Choose keys.

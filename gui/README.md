@@ -21,7 +21,8 @@ What it does:
   said in words (the raw error goes to stderr).
 - Notifies when the phone is asked to approve a token (with the note it
   shows) and how that ended: approved, refused, no answer.
-- Password mode: *Unlock...* asks for the HEM password, logs in to the HEM
+- Password mode: *Unlock...* (in the tray) opens the window, whose *Unlock
+  with password* asks for the HEM password, logs in to the HEM
   itself (check-in first, then a token for every key the agent serves) and
   hands the agent only the token. By default the session secret is dropped at
   once; the remember choice (15 minutes, 1 hour, 4 hours, or until Lock; the
