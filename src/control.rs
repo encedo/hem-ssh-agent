@@ -11,9 +11,12 @@
 //! (or `ssh-add -X`) hands over another. `Request` refuses unknown fields, so
 //! the rule holds even when a field would be convenient.
 //!
-//! Five operations: `whoami` (build and caller), `watch` (a snapshot of the
+//! Seven operations: `whoami` (build and caller), `watch` (a snapshot of the
 //! state now and on every change), `token` (use this token), `lock`,
-//! `use_password` (stop asking the phone, wait for the window's token).
+//! `use_password` (stop asking the phone, wait for the window's token),
+//! `reload` (read the configuration and the window's choice of HEM and keys
+//! again - the choice travels in `chosen.toml`, not here) and `unlock_phone`
+//! (ask the phone for a token now).
 
 use std::io;
 
@@ -37,7 +40,8 @@ pub enum Op {
     Whoami,
     /// The state now, then again on every change, on this connection.
     Watch,
-    /// Use this token for signing (password mode: the window logged in).
+    /// Use this token for signing: the window logged in with the password, or
+    /// the login of Choose keys (keymgmt:use of the keys picked) is handed over.
     Token,
     /// Drop the token (and the session secret of `ssh-add -X`).
     Lock,
@@ -45,6 +49,13 @@ pub enum Op {
     /// the waiting signs take the token the window hands over next.
     #[serde(rename = "use_password")]
     UsePassword,
+    /// Read the configuration file and the window's `chosen.toml` again and
+    /// serve the HEM and keys they name now (locks first).
+    Reload,
+    /// "Unlock by phone" (remote modes): ask the phone for a token now, not
+    /// at the first sign.
+    #[serde(rename = "unlock_phone")]
+    UnlockPhone,
 }
 
 /// Which artifact is speaking: a window and an agent from different builds
@@ -79,6 +90,11 @@ pub struct Request {
     /// agent serves (the kids are in the `watch` snapshot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// `op: token` only: how the window got the token - `password` (absent:
+    /// the window's login) or `phone` (Choose keys, approved on the phone).
+    /// What the state reports as its source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl Request {
@@ -93,9 +109,12 @@ impl Request {
                 if self.build.is_none() {
                     return Err("token needs to say which build is asking".into());
                 }
+                if !matches!(self.source.as_deref(), None | Some("password") | Some("phone")) {
+                    return Err("token source is password or phone".into());
+                }
             }
-            Op::Whoami | Op::Watch | Op::Lock | Op::UsePassword => {
-                if self.token.is_some() {
+            Op::Whoami | Op::Watch | Op::Lock | Op::UsePassword | Op::Reload | Op::UnlockPhone => {
+                if self.token.is_some() || self.source.is_some() {
                     return Err(format!("{:?} takes no token", self.op).to_lowercase());
                 }
             }
@@ -144,6 +163,7 @@ impl Reply {
 /// cannot show a state that was never true.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Status {
+    /// `unconfigured` (no HEM or no keys yet: the window's Choose keys),
     /// `locked` (password mode, no token and no session secret), `ready`, or
     /// `waiting` (a token is being approved on the phone).
     pub state: String,
@@ -173,6 +193,16 @@ pub struct Status {
     /// The last sign request and how it ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<Last>,
+    /// The configuration file names the HEM's address / the keys: the window
+    /// shows them and does not offer to change them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub url_fixed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keys_fixed: bool,
+    /// Where the window writes its choice of HEM and keys (`chosen.toml`
+    /// beside the configuration), unless the configuration fixes both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -196,8 +226,9 @@ pub struct Pending {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Last {
     pub note: String,
-    /// `signed`, `denied` (refused on the phone), `timeout` (no answer),
-    /// `locked` (no token, password mode) or `failed`.
+    /// `signed`, `unlocked` (Unlock by phone approved), `denied` (refused on
+    /// the phone), `timeout` (no answer), `locked` (no token, password mode)
+    /// or `failed`.
     pub result: String,
     /// Unix seconds.
     pub at: i64,
@@ -335,6 +366,17 @@ async fn handle(b: &[u8], who: &str, agent: &HemAgent) -> (Reply, bool) {
             Ok(()) => (Reply::ok(), false),
             Err(e) => (Reply::err(&e.code, e.to_string()), false),
         },
+        Op::Reload => match agent.reload().await {
+            Ok(()) => (Reply::ok(), false),
+            Err(e) => {
+                log::warn!("control: {who}: reload refused: {e}");
+                (Reply::err(&e.code, e.to_string()), false)
+            }
+        },
+        Op::UnlockPhone => match agent.unlock_phone().await {
+            Ok(()) => (Reply::ok(), false),
+            Err(e) => (Reply::err(&e.code, e.to_string()), false),
+        },
         Op::Token => {
             let theirs = req.build.unwrap_or_default();
             if theirs != current {
@@ -342,7 +384,8 @@ async fn handle(b: &[u8], who: &str, agent: &HemAgent) -> (Reply, bool) {
                 log::warn!("control: {who}: {msg}");
                 return (Reply { build: Some(current), ..Reply::err("build", msg) }, false);
             }
-            match agent.accept_token(req.token.as_deref().unwrap_or("")).await {
+            let source = if req.source.as_deref() == Some("phone") { "phone" } else { "password" };
+            match agent.accept_token(req.token.as_deref().unwrap_or(""), source).await {
                 Ok(exp) => {
                     log::info!("control: {who}: token accepted, expires {exp}");
                     (Reply::ok(), false)
@@ -376,6 +419,9 @@ mod tests {
                 kept: false,
                 pending: None,
                 last: None,
+                url_fixed: false,
+                keys_fixed: false,
+                chosen: None,
             },
         };
         assert_eq!(
@@ -385,6 +431,10 @@ mod tests {
         let q: Request = serde_json::from_str(r#"{"op":"token","build":{"release":"x"},"token":"t"}"#).unwrap();
         assert_eq!(q.op, Op::Token);
         assert!(q.validate().is_ok());
+        // Choose keys hands over the token the phone approved.
+        let phone: Request = serde_json::from_str(r#"{"op":"token","build":{"release":"x"},"token":"t","source":"phone"}"#).unwrap();
+        assert!(phone.validate().is_ok());
+        assert_eq!(phone.source.as_deref(), Some("phone"));
     }
 
     #[test]
@@ -402,12 +452,25 @@ mod tests {
         assert!(use_pw.validate().is_ok());
         let use_pw_tok: Request = serde_json::from_str(r#"{"op":"use_password","token":"t"}"#).unwrap();
         assert!(use_pw_tok.validate().is_err());
+        // reload carries nothing: the choice is in chosen.toml, not on the wire.
+        let reload: Request = serde_json::from_str(r#"{"op":"reload"}"#).unwrap();
+        assert!(reload.validate().is_ok());
+        assert!(serde_json::from_str::<Request>(r#"{"op":"reload","url":"https://x"}"#).is_err());
+        let reload_tok: Request = serde_json::from_str(r#"{"op":"reload","token":"t"}"#).unwrap();
+        assert!(reload_tok.validate().is_err());
+        let phone: Request = serde_json::from_str(r#"{"op":"unlock_phone"}"#).unwrap();
+        assert!(phone.validate().is_ok());
+        // A token's source is password or phone, and only a token has one.
+        let odd: Request = serde_json::from_str(r#"{"op":"token","build":{"release":"x"},"token":"t","source":"ssh"}"#).unwrap();
+        assert!(odd.validate().is_err());
+        let lock_src: Request = serde_json::from_str(r#"{"op":"lock","source":"phone"}"#).unwrap();
+        assert!(lock_src.validate().is_err());
     }
 
     #[tokio::test]
     async fn framing_round_trip_and_limit() {
         let (mut a, mut b) = tokio::io::duplex(1 << 20);
-        write_msg(&mut a, &Request { op: Op::Lock, build: None, token: None }).await.unwrap();
+        write_msg(&mut a, &Request { op: Op::Lock, build: None, token: None, source: None }).await.unwrap();
         let got = read_msg(&mut b).await.unwrap().unwrap();
         assert_eq!(got, br#"{"op":"lock"}"#);
         // A length over the limit is refused before the body is read.

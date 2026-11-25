@@ -18,6 +18,12 @@
 //! kid    = "9904cd6be703202a186dd8a2d1bfdb74"
 //! pubkey = "ssh-ed25519 AAAA... label"   # the output of `hem-ssh-agent pubkey`
 //! ```
+//!
+//! `url` and `[[key]]` fix the HEM and the keys. Either may be left out: the
+//! window then lets the person enter the address and pick keys from the
+//! HEM's list, and writes that choice to `chosen.toml` beside this file (same
+//! `url` / `[[key]]` shape), which the agent reads at start and on the
+//! control channel's `reload`. What this file names always wins.
 
 use std::path::{Path, PathBuf};
 
@@ -51,7 +57,7 @@ pub enum UvSetting {
     None,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct KeyConfig {
     pub kid: String,
@@ -62,7 +68,9 @@ pub struct KeyConfig {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The HEM, `https://` only (DEV-532: the agent refuses plain http).
-    pub url: String,
+    /// Absent: the window's choice (`chosen.toml`).
+    #[serde(default)]
+    pub url: Option<String>,
     #[serde(default)]
     pub auth: AuthMode,
     #[serde(default)]
@@ -108,6 +116,65 @@ pub fn default_path() -> Option<PathBuf> {
 pub fn load(path: &Path) -> Result<Config, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+impl Default for Config {
+    /// No configuration file: password mode, the HEM and keys from the window.
+    fn default() -> Self {
+        toml::from_str("").expect("every field has a default")
+    }
+}
+
+/// The window's choice of HEM and keys, for what the configuration leaves
+/// open. The window writes it; the agent only reads it.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Chosen {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default, rename = "key")]
+    pub keys: Vec<KeyConfig>,
+}
+
+/// `chosen.toml` beside the configuration file.
+pub fn chosen_path(config: &Path) -> PathBuf {
+    config.with_file_name("chosen.toml")
+}
+
+/// The window's choice; none made yet when the file is not there.
+pub fn load_chosen(path: &Path) -> Result<Chosen, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Chosen::default()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// What the agent serves: the configuration first, the window's choice for
+/// what it leaves open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Merged {
+    pub url: Option<String>,
+    pub keys: Vec<KeyConfig>,
+    pub url_fixed: bool,
+    pub keys_fixed: bool,
+}
+
+/// The chosen keys count only with the address they were picked from: an
+/// address the configuration fixed later, or a new one typed in the window,
+/// leaves no keys until they are picked again.
+pub fn merge(cfg: &Config, chosen: &Chosen) -> Merged {
+    let url_fixed = cfg.url.is_some();
+    let keys_fixed = !cfg.keys.is_empty();
+    let url = cfg.url.clone().or_else(|| chosen.url.clone());
+    let keys = if keys_fixed {
+        cfg.keys.clone()
+    } else if chosen.url.is_some() && chosen.url == url {
+        chosen.keys.clone()
+    } else {
+        Vec::new()
+    };
+    Merged { url, keys, url_fixed, keys_fixed }
 }
 
 impl KeyConfig {
@@ -156,5 +223,29 @@ mod tests {
         assert!(toml::from_str::<Config>("url = \"x\"\nauth = \"telepathy\"").is_err());
         let both: Config = toml::from_str("url = \"x\"\nauth = \"remote+password\"").unwrap();
         assert_eq!(both.auth, AuthMode::RemotePassword);
+    }
+
+    #[test]
+    fn the_configuration_wins_over_the_choice() {
+        let key = |kid: &str| KeyConfig { kid: kid.into(), pubkey: LINE.into() };
+        let chosen = Chosen { url: Some("https://a".into()), keys: vec![key("c")] };
+        // Nothing in the file: the window's choice.
+        let m = merge(&Config::default(), &chosen);
+        assert_eq!((m.url.as_deref(), m.keys.clone(), m.url_fixed, m.keys_fixed), (Some("https://a"), vec![key("c")], false, false));
+        // The file fixes the same address: the chosen keys stay.
+        let same = Config { url: Some("https://a".into()), ..Config::default() };
+        assert_eq!(merge(&same, &chosen).keys, vec![key("c")]);
+        // Another address in the file: keys picked on the old one do not count.
+        let other = Config { url: Some("https://b".into()), ..Config::default() };
+        let m = merge(&other, &chosen);
+        assert_eq!((m.url.as_deref(), m.keys.is_empty(), m.url_fixed), (Some("https://b"), true, true));
+        // Keys in the file: those, whatever was chosen.
+        let fixed = Config { keys: vec![key("f")], ..Config::default() };
+        let m = merge(&fixed, &chosen);
+        assert_eq!((m.keys.clone(), m.keys_fixed, m.url.as_deref()), (vec![key("f")], true, Some("https://a")));
+        // Nothing chosen, nothing configured.
+        let m = merge(&Config::default(), &Chosen::default());
+        assert_eq!((m.url, m.keys.len()), (None, 0));
+        assert!(toml::from_str::<Chosen>("url = \"x\"\nauth = \"remote\"").is_err());
     }
 }

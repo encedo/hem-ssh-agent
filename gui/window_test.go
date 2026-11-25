@@ -28,6 +28,7 @@ func TestWindowKeepsOneSize(t *testing.T) {
 	}
 	long := "https://" + strings.Repeat("a-very-long-host-name.", 6) + "ence.do"
 	states := []Status{
+		{State: "unconfigured", Auth: "password", Chosen: "chosen.toml"},
 		{State: "locked", Auth: "password"},
 		{State: "ready", Auth: "remote+password", URL: long, Keys: keys, ExpiresAt: time.Now().Unix() + 300, Source: "phone"},
 		{State: "waiting", Auth: "remote+password", URL: long, Keys: keys, Pending: &Pending{Note: "sign", Since: 1}},

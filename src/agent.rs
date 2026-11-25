@@ -14,7 +14,7 @@ use tokio::sync::watch;
 use zeroize::Zeroizing;
 
 use crate::control::{KeyInfo, Last, Pending, Status};
-use crate::note::{computer_name, note};
+use crate::note::{computer_name, note, unlock_note};
 
 /// One HEM key served by the agent: its kid and the public half.
 #[derive(Clone, Debug)]
@@ -111,12 +111,73 @@ impl State {
     }
 }
 
+/// What the agent serves: the HEM and its keys. Replaced as a whole by
+/// `reload` (the window's choice of address and keys).
+pub struct Served {
+    /// `None`: no HEM address yet - neither the configuration nor the
+    /// window's choice names one.
+    hem: Option<Arc<Hem>>,
+    keys: Vec<AgentKey>,
+    scopes: Vec<String>,
+    /// The HEM's address the window logs in to (`Hem` does not expose the
+    /// one it was made with).
+    url: String,
+    /// The configuration file names the address / the keys: the window shows
+    /// them and does not change them.
+    url_fixed: bool,
+    keys_fixed: bool,
+    /// Where the window writes its choice (`chosen.toml`), unless both are fixed.
+    chosen: Option<String>,
+}
+
+impl Served {
+    pub fn new(hem: Option<Arc<Hem>>, keys: Vec<AgentKey>, url: &str) -> Self {
+        let scopes = key_scopes(&keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>());
+        Served { hem, keys, scopes, url: url.to_owned(), url_fixed: false, keys_fixed: false, chosen: None }
+    }
+
+    /// Which of the two the configuration file fixes, and where the window's
+    /// choice goes.
+    pub fn fixed(mut self, url_fixed: bool, keys_fixed: bool, chosen: Option<String>) -> Self {
+        self.url_fixed = url_fixed;
+        self.keys_fixed = keys_fixed;
+        self.chosen = if url_fixed && keys_fixed { None } else { chosen };
+        self
+    }
+
+    /// A HEM and at least one key: something to sign with.
+    fn configured(&self) -> bool {
+        self.hem.is_some() && !self.keys.is_empty()
+    }
+
+    fn hem(&self) -> hem_sdk::Result<&Hem> {
+        self.hem.as_deref().ok_or_else(|| HemError::new("not_configured", "no HEM chosen yet (the window: Choose keys)"))
+    }
+
+    fn find(&self, credential: &PublicCredential) -> Option<&AgentKey> {
+        let PublicCredential::Key(wanted) = credential else { return None };
+        self.keys.iter().find(|k| &k.public == wanted)
+    }
+
+    /// Drops the session secret and the cached tokens of its `Hem`.
+    fn forget(&self) {
+        if let Some(h) = &self.hem {
+            h.clear_keys();
+            h.clear_cache();
+        }
+    }
+}
+
+/// Reads the configuration and the window's choice again (`reload`).
+pub type Reloader = Arc<dyn Fn() -> Result<Served, String> + Send + Sync>;
+
 /// The agent: one per process, cloned into every client connection.
 #[derive(Clone)]
 pub struct HemAgent {
-    hem: Arc<Hem>,
-    keys: Arc<Vec<AgentKey>>,
-    scopes: Arc<Vec<String>>,
+    /// Read without holding it: every request takes the `Arc` it starts with,
+    /// so a `reload` meanwhile does not change the HEM under it.
+    served: Arc<std::sync::RwLock<Arc<Served>>>,
+    reloader: Option<Reloader>,
     auth: Auth,
     /// Held while a token is got, so parallel signs ask the phone once. The
     /// state lock is never held across the phone wait: the window's token,
@@ -129,14 +190,17 @@ pub struct HemAgent {
     computer: Option<String>,
     /// The state as the control channel shows it (`watch`).
     status: watch::Sender<Status>,
-    /// The HEM's address, shown to the window (`with_url`).
-    url: Arc<str>,
 }
 
 impl HemAgent {
     /// Starts locked in password mode (no keys listed until unlocked).
     pub fn new(hem: Arc<Hem>, keys: Vec<AgentKey>, auth: Auth) -> Self {
-        let scopes = key_scopes(&keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>());
+        Self::serving(Served::new(Some(hem), keys, ""), auth)
+    }
+
+    /// An agent for `served`, which may name no HEM or no keys yet
+    /// (`unconfigured` until the window's choice and a `reload`).
+    pub fn serving(served: Served, auth: Auth) -> Self {
         let (status, _) = watch::channel(Status {
             state: String::new(),
             auth: String::new(),
@@ -148,33 +212,37 @@ impl HemAgent {
             kept: false,
             pending: None,
             last: None,
+            url_fixed: false,
+            keys_fixed: false,
+            chosen: None,
         });
         let agent = Self {
-            hem,
-            keys: Arc::new(keys),
-            scopes: Arc::new(scopes),
+            served: Arc::new(std::sync::RwLock::new(Arc::new(served))),
+            reloader: None,
             auth,
             fetch: Arc::default(),
             state: Arc::default(),
             wake: watch::channel(0).0,
             computer: computer_name(),
             status,
-            url: Arc::from(""),
         };
         agent.publish(&State::default());
         agent
     }
 
-    /// The HEM's address the window logs in to (the configuration's `url`;
-    /// `Hem` does not expose the one it was made with).
-    pub fn with_url(mut self, url: &str) -> Self {
-        self.url = Arc::from(url);
-        self.publish(&State::default());
+    /// How `reload` reads the configuration and the window's choice again.
+    pub fn with_reloader(mut self, reloader: Reloader) -> Self {
+        self.reloader = Some(reloader);
         self
     }
 
-    pub fn keys(&self) -> &[AgentKey] {
-        &self.keys
+    fn served(&self) -> Arc<Served> {
+        self.served.read().expect("not poisoned").clone()
+    }
+
+    /// The keys served now.
+    pub fn keys(&self) -> Vec<AgentKey> {
+        self.served().keys.clone()
     }
 
     /// The state now and on every change (the control channel's `watch`).
@@ -200,7 +268,10 @@ impl HemAgent {
     }
 
     fn snapshot(&self, st: &State) -> Status {
-        let state = if st.pending.is_some() {
+        let sv = self.served();
+        let state = if !sv.configured() {
+            "unconfigured"
+        } else if st.pending.is_some() {
             "waiting"
         } else if self.password_mode() && !st.unlocked && !st.token_valid() {
             "locked"
@@ -217,14 +288,17 @@ impl HemAgent {
                 Auth::Remote { password: Some(_), .. } => "remote+password",
             }
             .into(),
-            url: self.url.to_string(),
+            url: sv.url.clone(),
             ttl: self.password_ttl(),
-            keys: self.keys.iter().map(|k| KeyInfo { kid: k.kid.clone(), comment: k.comment.clone() }).collect(),
+            keys: sv.keys.iter().map(|k| KeyInfo { kid: k.kid.clone(), comment: k.comment.clone() }).collect(),
             expires_at,
             source: expires_at.map(|_| st.source.to_owned()),
             kept: st.unlocked,
             pending: st.pending.clone(),
             last: st.last.clone(),
+            url_fixed: sv.url_fixed,
+            keys_fixed: sv.keys_fixed,
+            chosen: sv.chosen.clone(),
         }
     }
 
@@ -257,7 +331,7 @@ impl HemAgent {
     /// expired, must hold `keymgmt:use:<kid>` for every key served, and the
     /// HEM must accept it (the configured public keys are checked with it,
     /// once per key). Returns its `exp`.
-    pub async fn accept_token(&self, token: &str) -> hem_sdk::Result<i64> {
+    pub async fn accept_token(&self, token: &str, source: &'static str) -> hem_sdk::Result<i64> {
         let payload = jwt_parse(token).ok_or_else(|| HemError::new("invalid_arg", "not a token"))?;
         let exp = payload
             .get("exp")
@@ -272,13 +346,15 @@ impl HemAgent {
             .and_then(|s| serde_json::from_value(s).ok())
             .ok_or_else(|| HemError::new("invalid_arg", "the token has no scope"))?;
         let granted = granted.values();
-        if let Some(missing) = self.scopes.iter().find(|s| !granted.contains(&s.as_str())) {
+        let sv = self.served();
+        sv.hem()?;
+        if let Some(missing) = sv.scopes.iter().find(|s| !granted.contains(&s.as_str())) {
             return Err(HemError::new("invalid_arg", format!("the token does not hold {missing}")));
         }
         let mut st = self.state.lock().await;
-        self.verify_keys(&mut st, token).await?;
+        self.verify_keys(&sv, &mut st, token).await?;
         st.token = Some((token.to_owned(), exp));
-        st.source = "password"; // the window logs in with the password
+        st.source = source; // the window's password login, or the phone's approval of Choose keys
         self.publish(&st);
         drop(st);
         self.wake_waits(); // a phone or password wait takes it
@@ -314,17 +390,18 @@ impl HemAgent {
         let Some(ttl) = self.password_ttl() else {
             return Err(HemError::new("invalid_arg", "unlock: the agent is in remote mode"));
         };
+        let sv = self.served();
+        let hem = sv.hem()?;
         let mut st = self.state.lock().await;
-        self.hem.clear_keys();
-        self.hem.clear_cache();
+        sv.forget();
         st.token = None;
-        if let Err(e) = self.hem.hem_checkin().await {
+        if let Err(e) = hem.hem_checkin().await {
             log::warn!("check-in failed, logging in without it: {} ({e})", e.code);
         }
         let opts = AuthOptions { exp_seconds: ttl, remember: true, ctx: None };
-        let token = self.hem.authorize_password(Some(password), self.scopes.to_vec(), opts).await?;
-        if let Err(e) = self.verify_keys(&mut st, &token).await {
-            self.hem.clear_keys();
+        let token = hem.authorize_password(Some(password), sv.scopes.clone(), opts).await?;
+        if let Err(e) = self.verify_keys(&sv, &mut st, &token).await {
+            hem.clear_keys();
             return Err(e);
         }
         st.unlocked = true;
@@ -347,12 +424,66 @@ impl HemAgent {
         st.token = None;
         st.password_wait = None;
         st.locks = st.locks.wrapping_add(1);
-        self.hem.clear_keys();
-        self.hem.clear_cache();
+        self.served().forget();
         self.publish(&st);
         drop(st);
         self.wake_waits();
         log::info!("locked");
+    }
+
+    /// The control channel's `reload`: the configuration and the window's
+    /// choice (`chosen.toml`) are read again and the agent serves what they
+    /// name now. Locks first - the tokens and the session secret belong to
+    /// the old choice - and checks the keys again with the next token.
+    pub async fn reload(&self) -> hem_sdk::Result<()> {
+        let Some(reloader) = &self.reloader else {
+            return Err(HemError::new("invalid_arg", "reload: this agent was not started from a configuration"));
+        };
+        let next = reloader().map_err(|e| HemError::new("invalid_arg", e))?;
+        self.lock().await;
+        let mut st = self.state.lock().await;
+        let old = std::mem::replace(&mut *self.served.write().expect("not poisoned"), Arc::new(next));
+        old.forget();
+        st.verified.clear();
+        st.last = None;
+        let sv = self.served();
+        log::info!("reloaded: {} key(s) at {}", sv.keys.len(), if sv.url.is_empty() { "(no HEM)" } else { &sv.url });
+        for k in &sv.keys {
+            log::info!("key {}: {}", k.kid, k.openssh());
+        }
+        self.publish(&st);
+        Ok(())
+    }
+
+    /// The control channel's `unlock_phone` (remote modes, the window's
+    /// "Unlock by phone"): asks the phone for a token now, as the first sign
+    /// would, so that the signs to come do not wait. Returns at once; the
+    /// wait and its end show in the state (`waiting`, then `last`).
+    pub async fn unlock_phone(&self) -> hem_sdk::Result<()> {
+        if !matches!(self.auth, Auth::Remote { .. }) {
+            return Err(HemError::new("invalid_arg", "unlock_phone: the phone is not used (auth)"));
+        }
+        self.served().hem()?;
+        {
+            let st = self.state.lock().await;
+            if st.token_valid() || st.pending.is_some() {
+                return Ok(()); // unlocked already, or the phone is being asked
+            }
+        }
+        let me = self.clone();
+        let what = unlock_note(self.computer.as_deref());
+        log::info!("unlock: {what}");
+        tokio::spawn(async move {
+            let result = match me.token(what.clone()).await {
+                Ok(_) => "unlocked",
+                Err(e) => {
+                    log::warn!("unlock: {} ({e})", e.code);
+                    outcome(&e)
+                }
+            };
+            me.record(&what, result).await;
+        });
+        Ok(())
     }
 
     /// Password mode with neither the session secret (`ssh-add -X`) nor a valid
@@ -365,11 +496,6 @@ impl HemAgent {
         !st.unlocked && !st.token_valid()
     }
 
-    fn find(&self, credential: &PublicCredential) -> Option<&AgentKey> {
-        let PublicCredential::Key(wanted) = credential else { return None };
-        self.keys.iter().find(|k| &k.public == wanted)
-    }
-
     /// A token for every key scope: cached, or minted from the kept key, or
     /// approved on the phone (with `note` shown there).
     ///
@@ -378,6 +504,8 @@ impl HemAgent {
     /// password mode (a HEM behind an air gap still works without it).
     async fn token(&self, note: String) -> hem_sdk::Result<String> {
         let _one = self.fetch.lock().await;
+        let sv = self.served();
+        let hem = sv.hem()?;
         let mut st = self.state.lock().await;
         if st.token_valid() {
             return Ok(st.token.as_ref().expect("valid").0.clone());
@@ -386,11 +514,11 @@ impl HemAgent {
             // The session secret is kept (ssh-add -X, run --login): password
             // mode, or remote mode whose password was chosen until Lock.
             Auth::Password { ttl } | Auth::Remote { password: Some(ttl), .. } if st.unlocked => {
-                if let Err(e) = self.hem.hem_checkin().await {
+                if let Err(e) = hem.hem_checkin().await {
                     log::warn!("check-in failed, logging in without it: {} ({e})", e.code);
                 }
                 let opts = AuthOptions { exp_seconds: *ttl, remember: true, ctx: None };
-                self.hem.authorize_password(None, self.scopes.to_vec(), opts).await?
+                hem.authorize_password(None, sv.scopes.clone(), opts).await?
             }
             Auth::Password { .. } => {
                 return Err(HemError::new("auth_password_required", "agent locked: ssh-add -X or the window"));
@@ -398,20 +526,20 @@ impl HemAgent {
             Auth::Remote { uv, timeout, .. } => {
                 let locks = st.locks;
                 drop(st); // the window's token, Use password and Lock get through meanwhile
-                let got = self.approve(note, *uv, *timeout, locks).await;
+                let got = self.approve(&sv, note, *uv, *timeout, locks).await;
                 let mut st = self.state.lock().await;
                 st.pending = None; // published with the sign's result
                 st.password_wait = None;
                 match got? {
                     Got::Stored(token) => return Ok(token),
                     Got::Fresh(token) => {
-                        self.verify_keys(&mut st, &token).await?;
+                        self.verify_keys(&sv, &mut st, &token).await?;
                         return Ok(self.store(&mut st, token, "phone"));
                     }
                 }
             }
         };
-        self.verify_keys(&mut st, &token).await?;
+        self.verify_keys(&sv, &mut st, &token).await?;
         Ok(self.store(&mut st, token, "password"))
     }
 
@@ -430,7 +558,15 @@ impl HemAgent {
     /// the window's token. Every way out but the phone's own answer drops the
     /// request, and the SDK withdraws it on the broker: the phone stops
     /// showing it, and a late answer changes nothing.
-    async fn approve(&self, note: String, uv: Option<Uv>, timeout: std::time::Duration, locks: u64) -> hem_sdk::Result<Got> {
+    async fn approve(
+        &self,
+        sv: &Served,
+        note: String,
+        uv: Option<Uv>,
+        timeout: std::time::Duration,
+        locks: u64,
+    ) -> hem_sdk::Result<Got> {
+        let hem = sv.hem()?;
         let mut wake = self.wake.subscribe();
         {
             let mut st = self.state.lock().await;
@@ -438,9 +574,9 @@ impl HemAgent {
             self.publish(&st);
         }
         let mut phone = Box::pin(async {
-            self.hem.hem_checkin().await?;
+            hem.hem_checkin().await?;
             let opts = RemoteOptions { require: uv, note: Some(note), poll_timeout: timeout, ..Default::default() };
-            self.hem.authorize_remote(self.scopes.to_vec(), opts).await
+            hem.authorize_remote(sv.scopes.clone(), opts).await
         });
         loop {
             tokio::select! {
@@ -497,12 +633,13 @@ impl HemAgent {
 
     /// Once per key: the configured public key must be the HEM's, or the
     /// agent would offer servers a key it cannot sign for.
-    async fn verify_keys(&self, st: &mut State, token: &str) -> hem_sdk::Result<()> {
-        for k in self.keys.iter() {
+    async fn verify_keys(&self, sv: &Served, st: &mut State, token: &str) -> hem_sdk::Result<()> {
+        let hem = sv.hem()?;
+        for k in sv.keys.iter() {
             if st.verified.contains(&k.kid) {
                 continue;
             }
-            let hem_key = load_key(&self.hem, token, &k.kid).await?;
+            let hem_key = load_key(hem, token, &k.kid).await?;
             if hem_key.public != k.public {
                 return Err(HemError::new(
                     "invalid_arg",
@@ -522,6 +659,7 @@ impl Session for HemAgent {
             return Ok(Vec::new()); // as a locked OpenSSH agent
         }
         Ok(self
+            .served()
             .keys
             .iter()
             .map(|k| Identity { credential: PublicCredential::Key(k.public.clone()), comment: k.comment.clone() })
@@ -529,9 +667,13 @@ impl Session for HemAgent {
     }
 
     async fn sign(&mut self, req: SignRequest) -> Result<Signature, AgentError> {
-        let Some(key) = self.find(&req.credential) else {
+        let sv = self.served();
+        let Some(key) = sv.find(&req.credential) else {
             log::info!("sign: key not served by this agent");
             return Err(AgentError::Failure);
+        };
+        let Ok(hem) = sv.hem() else {
+            return Err(AgentError::Failure); // no HEM chosen yet: no keys listed either
         };
         let what = note(&req.data, &key.comment, self.computer.as_deref());
         log::info!("sign: {} - {what}", key.kid);
@@ -542,7 +684,7 @@ impl Session for HemAgent {
                 return Err(failed(&key.kid, "token", e));
             }
         };
-        let sig = match self.hem.exdsa_sign(&token, &key.kid, &req.data, SignOptions::default()).await {
+        let sig = match hem.exdsa_sign(&token, &key.kid, &req.data, SignOptions::default()).await {
             Ok(s) => s,
             Err(e) => {
                 self.record(&what, "failed").await;

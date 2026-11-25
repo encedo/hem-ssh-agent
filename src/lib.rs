@@ -14,4 +14,4 @@ pub mod note;
 #[cfg(windows)]
 pub mod pageant;
 
-pub use agent::{key_scopes, load_key, AgentKey, Auth, HemAgent};
+pub use agent::{key_scopes, load_key, AgentKey, Auth, HemAgent, Reloader, Served};

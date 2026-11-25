@@ -41,7 +41,7 @@ Built on [hem-sdk-rust](https://github.com/encedo/hem-sdk-rust).
 git clone --recurse-submodules https://github.com/encedo/hem-ssh-agent
 cd hem-ssh-agent && cargo build --release
 
-hem-ssh-agent keys   --url https://my.ence.do            # Ed25519 keys: kid + label
+hem-ssh-agent keys   --url https://my.ence.do            # SSH keys (Ed25519, descr ETSSSH...): kid + label
 hem-ssh-agent pubkey --url https://my.ence.do --kid <kid> # line for config / authorized_keys / GitHub
 ```
 
@@ -62,6 +62,11 @@ pageant = false        # Windows: also serve PuTTY / plink / WinSCP (off while a
 kid    = "<kid>"
 pubkey = "ssh-ed25519 AAAA... label"   # the pubkey output
 ```
+
+With the tray window, `url` and `[[key]]` may be left out: the window asks
+for the address and *Choose keys...* lists the HEM's SSH keys (Ed25519,
+description starting with `ETSSSH`) to pick from; the choice goes to
+`chosen.toml` beside `config.toml`. What `config.toml` names always wins.
 
 ```bash
 hem-ssh-agent run      # password mode starts locked: ssh-add -X; ssh-add -x locks

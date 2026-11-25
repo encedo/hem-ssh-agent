@@ -8,7 +8,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hem_sdk::{Hem, HemOptions};
 use hem_ssh_agent::control::{read_msg, write_msg, Build, Msg, Reply, Status, MAX_MESSAGE};
-use hem_ssh_agent::{listen, AgentKey, Auth, HemAgent};
+use hem_ssh_agent::{listen, AgentKey, Auth, HemAgent, Reloader, Served};
 use ssh_key::public::{Ed25519PublicKey, KeyData};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
@@ -25,8 +25,8 @@ fn agent() -> HemAgent {
     HemAgent::new(hem, vec![key], Auth::Password { ttl: 60 })
 }
 
-fn address() -> String {
-    let tag = format!("hem-ssh-agent-control-test-{}", std::process::id());
+fn address(case: &str) -> String {
+    let tag = format!("hem-ssh-agent-control-test-{case}-{}", std::process::id());
     #[cfg(windows)]
     return format!(r"\\.\pipe\{tag}");
     #[cfg(unix)]
@@ -69,7 +69,7 @@ fn now() -> i64 {
 
 #[tokio::test]
 async fn control_channel() {
-    let address = address();
+    let address = address("main");
     let listener = listen::bind(&address).await.unwrap();
     tokio::spawn(hem_ssh_agent::control::serve(listener, agent()));
     let mut c = connect(&address).await;
@@ -139,4 +139,65 @@ async fn control_channel() {
     let mut c = connect(&address).await;
     write_msg(&mut c, &serde_json::json!({"op": "whoami"})).await.unwrap();
     assert!(matches!(next(&mut c).await, Msg::Reply { reply: Reply { ok: true, .. } }));
+}
+
+/// No HEM chosen yet: `unconfigured`, nothing to sign with; `reload` serves
+/// the new choice (here: one key) and the state follows. Offline: nothing
+/// here reaches a HEM.
+#[tokio::test]
+async fn reload_serves_the_new_choice() {
+    let chosen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reloader: Reloader = {
+        let chosen = chosen.clone();
+        Arc::new(move || {
+            if !chosen.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("chosen.toml: not there yet".into());
+            }
+            let hem = Arc::new(Hem::new("https://127.0.0.1:9", HemOptions::default()).unwrap());
+            let key = AgentKey {
+                kid: KID.into(),
+                public: KeyData::Ed25519(Ed25519PublicKey([7; 32])),
+                comment: "chosen".into(),
+            };
+            Ok(Served::new(Some(hem), vec![key], "https://127.0.0.1:9").fixed(false, false, Some("chosen.toml".into())))
+        })
+    };
+    let first = Served::new(None, Vec::new(), "").fixed(false, false, Some("chosen.toml".into()));
+    let agent = HemAgent::serving(first, Auth::Password { ttl: 60 }).with_reloader(reloader);
+    let address = address("reload");
+    let listener = listen::bind(&address).await.unwrap();
+    tokio::spawn(hem_ssh_agent::control::serve(listener, agent));
+    let mut c = connect(&address).await;
+    let build = serde_json::to_string(&Build::current()).unwrap();
+
+    let r = ask(&mut c, r#"{"op":"watch"}"#).await;
+    assert!(r.ok, "{r:?}");
+    let Msg::Event { event } = next(&mut c).await else { panic!("expected the snapshot") };
+    assert_eq!(event.state, "unconfigured");
+    assert_eq!((event.keys.len(), event.url.as_str(), event.chosen.as_deref()), (0, "", Some("chosen.toml")));
+    assert!(!event.url_fixed && !event.keys_fixed);
+
+    // Unconfigured: a token has no keys to be for; the phone is not this mode.
+    let mut d = connect(&address).await;
+    let tok = jwt(&format!(r#"{{"exp":{},"scope":["keymgmt:use:{KID}"]}}"#, now() + 600));
+    let r = ask(&mut d, &format!(r#"{{"op":"token","token":"{tok}","build":{build}}}"#)).await;
+    assert_eq!(r.kind.as_deref(), Some("not_configured"), "{r:?}");
+    let r = ask(&mut d, r#"{"op":"unlock_phone"}"#).await;
+    assert_eq!(r.kind.as_deref(), Some("invalid_arg"), "{r:?}");
+
+    // A choice that cannot be read is refused; the agent stays as it was.
+    let r = ask(&mut d, r#"{"op":"reload"}"#).await;
+    assert!(!r.ok, "{r:?}");
+
+    chosen.store(true, std::sync::atomic::Ordering::SeqCst);
+    let r = ask(&mut d, r#"{"op":"reload"}"#).await;
+    assert!(r.ok, "{r:?}");
+    let event = loop {
+        let Msg::Event { event } = next(&mut c).await else { panic!("expected a snapshot") };
+        if event.state != "unconfigured" {
+            break event;
+        }
+    };
+    assert_eq!((event.state.as_str(), event.keys.len(), event.url.as_str()), ("locked", 1, "https://127.0.0.1:9"));
+    assert_eq!(event.keys[0].comment, "chosen");
 }

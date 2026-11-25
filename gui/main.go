@@ -34,6 +34,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 
@@ -123,6 +124,13 @@ type ui struct {
 	message string
 	unlock  *widget.Button
 	lockBtn *widget.Button
+	// addr: the HEM's address - the agent's, or typed for Choose keys;
+	// addrShown is what was last put there, so a typed one is not overwritten.
+	addr      *widget.Entry
+	addrShown string
+	keysBtn   *widget.Button
+	phoneBtn  *widget.Button
+	busy      bool // Choose keys is listing (UI goroutine)
 }
 
 func main() {
@@ -259,9 +267,23 @@ func (u *ui) build() {
 	u.unlock = widget.NewButton("Unlock", u.onUnlock)
 	u.unlock.Importance = widget.HighImportance
 	u.lockBtn = widget.NewButton("Lock", u.onLock)
-	u.pass.OnSubmitted = func(string) { u.onUnlock() }
-	u.win.SetContent(container.NewVBox(infoBox, u.pass, u.remember, hint,
-		container.NewGridWithColumns(2, u.lockBtn, u.unlock)))
+	// Enter: Unlock, or - not set up yet - Choose keys.
+	u.pass.OnSubmitted = func(string) {
+		if s, seen, _ := u.snapshot(); seen && !canUnlock(s) && canChoose(s) {
+			u.onChooseKeys()
+			return
+		}
+		u.onUnlock()
+	}
+	// Always shown (owner): the configuration's address greyed out, or the
+	// one to list keys from.
+	u.addr = widget.NewEntry()
+	u.addr.SetPlaceHolder("HEM address: https://...")
+	u.keysBtn = widget.NewButton("Choose keys...", u.onChooseKeys)
+	u.phoneBtn = widget.NewButton("Unlock by phone", u.onUnlockPhone)
+	u.win.SetContent(container.NewVBox(infoBox, u.addr, u.pass, u.remember, hint,
+		container.NewGridWithColumns(2, u.lockBtn, u.unlock),
+		container.NewGridWithColumns(2, u.phoneBtn, u.keysBtn)))
 	u.win.SetFixedSize(true) // a small dialog: no maximise, no resize
 	u.win.Resize(fyne.NewSize(400, 0))
 	u.win.SetCloseIntercept(u.closeWindow)
@@ -588,6 +610,8 @@ func (u *ui) notifyResult(l Last, waited *Pending) {
 	// Failures always; a success only when the phone was asked, so a git
 	// fetch with a live token does not raise a notification.
 	switch {
+	case l.Result == "unlocked":
+		u.notify("Unlocked by phone", l.Note)
 	case l.Result == "signed":
 		if waited != nil && !waited.Password {
 			u.notify("Approved", l.Note)
@@ -625,6 +649,10 @@ func (u *ui) stateLine() string {
 		return "Agent: " + down
 	case !seen:
 		return "Agent: connecting..."
+	case s.State == "unconfigured" && s.URL == "":
+		return "Not set up - enter the HEM's address and choose its keys"
+	case s.State == "unconfigured":
+		return "Not set up - choose the HEM's keys"
 	case s.State == "waiting" && s.Pending != nil && s.Pending.Password:
 		return "Waiting for the password"
 	case s.State == "waiting":
@@ -695,6 +723,8 @@ func (u *ui) renderMenu() {
 	// to lock - a token, a wait (it cancels), a kept or remembered secret -
 	// otherwise Unlock... when that does something.
 	switch {
+	case seen && s.State == "unconfigured" && canChoose(s):
+		items = append(items, fyne.NewMenuItem("Choose keys...", u.present))
 	case u.canLock(s, seen):
 		items = append(items, fyne.NewMenuItem("Lock", u.onLock))
 	case seen && canUnlock(s):
@@ -730,26 +760,33 @@ func (u *ui) renderWindow() {
 		text += "\n\n" + u.message
 	}
 	u.info.SetText(text)
-	if seen && canUnlock(s) {
-		u.unlock.Enable()
-		u.pass.Enable()
-		u.remember.Enable()
-	} else {
-		u.unlock.Disable()
-		u.pass.Disable()
-		u.remember.Disable()
+	// The address: the agent's, unless the person has typed another one.
+	if u.addr.Text == u.addrShown && s.URL != u.addrShown {
+		u.addr.SetText(s.URL)
+		u.addrShown = s.URL
 	}
-	if u.canLock(s, seen) {
-		u.lockBtn.Enable()
+	enable(u.addr, seen && !s.URLFixed && canChoose(s) && !u.busy)
+	enable(u.unlock, seen && canUnlock(s))
+	enable(u.remember, seen && canUnlock(s))
+	// The password also lists the keys (Choose keys), so not only to unlock.
+	enable(u.pass, seen && passwordAllowed(s) && (canUnlock(s) || canChoose(s)))
+	enable(u.lockBtn, u.canLock(s, seen))
+	enable(u.keysBtn, seen && canChoose(s) && !u.busy)
+	enable(u.phoneBtn, seen && canUnlockPhone(s))
+}
+
+func enable(w fyne.Disableable, on bool) {
+	if on {
+		w.Enable()
 	} else {
-		u.lockBtn.Disable()
+		w.Disable()
 	}
 }
 
 func (u *ui) onUnlock() {
 	s, seen, _ := u.snapshot()
-	if !seen || !passwordAllowed(s) {
-		return // the button and the field are disabled then
+	if !seen || !passwordAllowed(s) || !canUnlock(s) {
+		return // the button is disabled then
 	}
 	if u.pass.Text == "" {
 		u.message = humanError(errNoPassword)
@@ -877,6 +914,173 @@ func (u *ui) onUsePassword() {
 			msg := humanError(err)
 			u.do(func() { u.notify("The phone is still asked", msg) })
 		}
+	}()
+}
+
+// onUnlockPhone: the agent asks the phone for a token now, so that the next
+// ssh does not wait for it (remote modes).
+func (u *ui) onUnlockPhone() {
+	u.phoneBtn.Disable()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := ask(ctx, u.control, Request{Op: "unlock_phone"})
+		u.do(func() {
+			if err != nil {
+				u.message = "Not asked: " + humanError(err)
+			} else {
+				u.message = "Approve on your phone."
+			}
+			u.renderWindow()
+		})
+	}()
+}
+
+// onChooseKeys finds the HEM's SSH keys - without a login when the HEM
+// allows it, otherwise with the password typed or approved on the phone -
+// and lets the person pick the ones to serve.
+func (u *ui) onChooseKeys() {
+	s, seen, _ := u.snapshot()
+	if !seen || !canChoose(s) || u.busy {
+		return
+	}
+	addr := strings.TrimSpace(u.addr.Text)
+	if s.URLFixed {
+		addr = s.URL
+	}
+	if !isHTTPS(addr) {
+		u.message = "The HEM address must start with https://"
+		u.renderWindow()
+		return
+	}
+	var pass []byte
+	if passwordAllowed(s) && u.pass.Text != "" {
+		pass = []byte(u.pass.Text)
+	}
+	u.pass.SetText("")
+	ks := newKeySession(addr, pass, s.Auth == "remote" || s.Auth == "remote+password")
+	u.busy = true
+	u.message = ""
+	u.renderWindow()
+	u.info.SetText("Looking for the HEM's SSH keys...")
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		keys, err := ks.search(ctx)
+		fyne.Do(func() {
+			if err != nil {
+				ks.close()
+				u.busy = false
+				u.message = "Keys not listed: " + keysError(err)
+				u.renderWindow()
+				return
+			}
+			u.pickKeys(ks, addr, s, keys)
+		})
+	}()
+}
+
+// keysError: humanError, plus what only Choose keys runs into.
+func keysError(err error) string {
+	switch {
+	case errors.Is(err, errNoSSHKeys):
+		return "The HEM has no SSH keys for this agent."
+	case errors.Is(err, errPasswordNeeded):
+		return "The HEM wants a login - type the HEM password and choose again."
+	}
+	return humanError(err)
+}
+
+// pickKeys: the list, at most maxKeys ticked; the keys served now are ticked
+// to start with when they are from this HEM. ks is closed when it ends.
+func (u *ui) pickKeys(ks *keySession, addr string, s Status, keys []hemKey) {
+	byLabel := make(map[string]hemKey, len(keys))
+	labels := make([]string, len(keys))
+	served := map[string]bool{}
+	if addr == s.URL {
+		for _, k := range s.Keys {
+			served[k.Kid] = true
+		}
+	}
+	var ticked []string
+	for i, k := range keys {
+		labels[i] = choiceLabel(k)
+		byLabel[labels[i]] = k
+		if served[k.KID] {
+			ticked = append(ticked, labels[i])
+		}
+	}
+	list := widget.NewCheckGroup(labels, nil)
+	list.SetSelected(ticked)
+	note := widget.NewLabel(fmt.Sprintf("Up to %d keys; ssh and git offer them in this order.", maxKeys))
+	note.Wrapping = fyne.TextWrapWord
+	note.Importance = widget.LowImportance
+	content := container.NewBorder(note, nil, nil, nil, container.NewVScroll(list))
+	d := dialog.NewCustomConfirm("Choose keys", "Use these", "Cancel", content, func(ok bool) {
+		var picked []hemKey
+		for _, l := range labels { // the list's order, not the order of the ticks
+			for _, t := range list.Selected {
+				if t == l {
+					picked = append(picked, byLabel[l])
+				}
+			}
+		}
+		switch {
+		case !ok:
+			u.message = ""
+		case len(picked) == 0:
+			u.message = "No key chosen - nothing changed."
+		case len(picked) > maxKeys:
+			u.message = fmt.Sprintf("At most %d keys - nothing changed.", maxKeys)
+		default:
+			u.saveChoice(ks, s.Chosen, addr, picked)
+			return
+		}
+		ks.close()
+		u.busy = false
+		u.renderWindow()
+	}, u.win)
+	// Inside the window, which keeps its size.
+	cs := u.win.Canvas().Size()
+	d.Resize(fyne.NewSize(cs.Width-24, cs.Height-24))
+	d.Show()
+}
+
+// saveChoice reads the public keys the search left out (a login for the keys
+// picked), writes chosen.toml and has the agent read it.
+func (u *ui) saveChoice(ks *keySession, path, addr string, keys []hemKey) {
+	u.info.SetText("Reading the chosen keys...")
+	go func() {
+		defer ks.close()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		msg := ""
+		if tok, err := ks.complete(ctx, keys); err != nil {
+			msg = "Keys not read: " + keysError(err)
+		} else if err := writeChosen(path, addr, keys); err != nil {
+			log.Printf("hem-ssh-agent-gui: writing %s: %v", path, err)
+			msg = "The choice could not be saved."
+		} else if _, err := ask(ctx, u.control, Request{Op: "reload"}); err != nil {
+			msg = "Saved, but the agent did not take it: " + humanError(err)
+		} else {
+			msg = fmt.Sprintf("%d key(s) chosen - the agent serves them now.", len(keys))
+			// The login that read the keys holds the scopes the agent signs
+			// with: handed over, the first ssh needs no second approval.
+			// Refused (expired, keys fixed in the configuration): the agent
+			// stays locked, as before.
+			if tok != "" {
+				if _, err := ask(ctx, u.control, Request{Op: "token", Build: currentBuild(), Token: tok, Source: ks.source()}); err != nil {
+					log.Printf("hem-ssh-agent-gui: the keys' token not handed over: %v", err)
+				} else {
+					msg += " Unlocked."
+				}
+			}
+		}
+		u.do(func() {
+			u.busy = false
+			u.message = msg
+			u.renderWindow()
+		})
 	}()
 }
 

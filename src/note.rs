@@ -26,6 +26,17 @@ pub fn note(data: &[u8], key_label: &str, computer: Option<&str>) -> String {
     truncate(s, NOTE_MAX)
 }
 
+/// The note of "Unlock by phone" (a token asked for before any sign):
+/// `unlock · hem-ssh-agent · <computer>`.
+pub fn unlock_note(computer: Option<&str>) -> String {
+    let mut s = "unlock · hem-ssh-agent".to_owned();
+    if let Some(c) = computer.filter(|c| !c.is_empty()) {
+        s.push_str(" · ");
+        s.push_str(&printable(c.as_bytes()));
+    }
+    truncate(s, NOTE_MAX)
+}
+
 /// The name of this computer, if the environment says it.
 pub fn computer_name() -> Option<String> {
     std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).ok().filter(|s| !s.is_empty())

@@ -8,11 +8,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use hem_sdk::{AuthOptions, Hem, HemError, HemOptions, RemoteOptions, Uv};
+use hem_sdk::{AuthOptions, Hem, HemError, HemOptions, RemoteOptions, SearchOptions, Uv};
 use zeroize::Zeroizing;
 
 use crate::config::{self, AuthMode, Config, UvSetting};
-use crate::{key_scopes, listen, load_key, Auth, HemAgent};
+use crate::{key_scopes, listen, load_key, Auth, HemAgent, Reloader, Served};
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -41,7 +41,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// List the Ed25519 keys in the HEM (kid and label).
+    /// List the HEM's SSH keys (kid and label): Ed25519 with the private key in
+    /// the HEM, description starting with ETSSSH.
     Keys {
         /// HEM address; default: `url` from the configuration file.
         #[arg(long, env = "HEM_URL")]
@@ -148,8 +149,12 @@ async fn dispatch(cli: Cli, background: bool) -> Res<()> {
         Cmd::Keys { url } => keys(load_config(cli.config, false)?, url).await,
         Cmd::Pubkey { url, kid } => pubkey(load_config(cli.config, false)?, url, kid).await,
         Cmd::Run { login, listen, control, .. } => {
-            let cfg = load_config(cli.config, true)?.expect("required");
-            run(cfg, login && !background, listen, control).await
+            // No file at the default place: password mode, the HEM and the
+            // keys from the window (chosen.toml). A --config that is not
+            // there is an error.
+            let path = cli.config.clone().or_else(config::default_path);
+            let cfg = load_config(cli.config, false)?.unwrap_or_default();
+            run(cfg, path, login && !background, listen, control).await
         }
         Cmd::Install { start, no_gui } => install(cli.config, start, no_gui),
         Cmd::Uninstall => uninstall(),
@@ -277,7 +282,8 @@ async fn cli_token(hem: &Hem, cfg: Option<&Config>, scope: Vec<String>, what: &s
 }
 
 fn url(flag: Option<String>, cfg: Option<&Config>) -> Res<String> {
-    let url = flag.or_else(|| cfg.map(|c| c.url.clone())).ok_or("no HEM address: --url, HEM_URL or the configuration file")?;
+    let url =
+        flag.or_else(|| cfg.and_then(|c| c.url.clone())).ok_or("no HEM address: --url, HEM_URL or the configuration file")?;
     https_only(url)
 }
 
@@ -293,10 +299,26 @@ fn https_only(url: String) -> Res<String> {
     }
 }
 
+/// The description prefix of the HEM keys meant for SSH (owner, 2026-11-24);
+/// the window's Choose keys searches for the same (gui/keys.go). Six bytes:
+/// the least the HEM searches for without a token.
+const SSH_DESCR_PREFIX: &[u8] = b"ETSSSH";
+
+/// The HEM's SSH keys: Ed25519, the private half in the HEM (`PKEY` - an
+/// imported public key cannot sign), description starting with
+/// `SSH_DESCR_PREFIX`. Without a token first (the HEM answers a 6-byte prefix
+/// search when `allow_keysearch` is on); refused, with a `keymgmt:search` token.
 async fn keys(cfg: Option<Config>, url_flag: Option<String>) -> Res<()> {
     let hem = Hem::new(&url(url_flag, cfg.as_ref())?, HemOptions::default())?;
-    let tok = cli_token(&hem, cfg.as_ref(), vec!["keymgmt:list".into()], "list keys").await?;
-    for k in hem.list_keys_all(&tok, false).await?.into_iter().filter(|k| k.key_type == "ED25519") {
+    let opts = || SearchOptions { key_type: Some("ED25519".into()), ..Default::default() };
+    let found = match hem.search_keys_all(None, SSH_DESCR_PREFIX, opts()).await {
+        Err(e) if e.status == 401 || e.status == 403 => {
+            let tok = cli_token(&hem, cfg.as_ref(), vec!["keymgmt:search".into()], "list SSH keys").await?;
+            hem.search_keys_all(Some(&tok), SSH_DESCR_PREFIX, opts()).await?
+        }
+        r => r?,
+    };
+    for k in found.into_iter().filter(|k| k.key_type == "ED25519" && k.flags.iter().any(|f| f == "PKEY")) {
         println!("{}  {}", k.kid, k.label);
     }
     Ok(())
@@ -317,8 +339,46 @@ fn agent_keys(cfg: &Config) -> Res<Vec<crate::AgentKey>> {
     Ok(keys)
 }
 
-async fn run(cfg: Config, login: bool, listen_flag: Option<String>, control_flag: Option<String>) -> Res<()> {
-    let keys = agent_keys(&cfg)?;
+/// What the agent serves: the configuration, then the window's choice
+/// (`chosen.toml` beside it) for what the configuration leaves open. No
+/// address or no keys: the agent runs `unconfigured` until the window has
+/// chosen and asked for a `reload`.
+fn served(cfg: &Config, chosen: Option<&Path>) -> Res<Served> {
+    let picked = match chosen {
+        Some(p) => config::load_chosen(p)?,
+        None => config::Chosen::default(),
+    };
+    let m = config::merge(cfg, &picked);
+    let keys = m.keys.iter().map(|k| k.agent_key()).collect::<Result<Vec<_>, _>>()?;
+    if keys.len() > 8 {
+        return Err("at most 8 keys (one token holds up to 8 scopes)".into());
+    }
+    let hem = match &m.url {
+        Some(u) => Some(Arc::new(Hem::new(&https_only(u.clone())?, HemOptions::default())?)), // DEV-532: https only
+        None => None,
+    };
+    let chosen = chosen.map(|p| p.display().to_string());
+    Ok(Served::new(hem, keys, m.url.as_deref().unwrap_or("")).fixed(m.url_fixed, m.keys_fixed, chosen))
+}
+
+async fn run(
+    cfg: Config,
+    config_path: Option<PathBuf>,
+    login: bool,
+    listen_flag: Option<String>,
+    control_flag: Option<String>,
+) -> Res<()> {
+    let chosen = config_path.as_deref().map(config::chosen_path);
+    // A bad choice does not stop the agent: it starts unconfigured and the
+    // window chooses again. A bad configuration does.
+    let first = match served(&cfg, chosen.as_deref()) {
+        Ok(s) => s,
+        Err(e) if chosen.is_some() => {
+            log::warn!("{e}: the window's choice is not used");
+            served(&cfg, None)?.fixed(cfg.url.is_some(), !cfg.keys.is_empty(), chosen.as_ref().map(|p| p.display().to_string()))
+        }
+        Err(e) => return Err(e),
+    };
     let address = match listen_flag.or(cfg.listen.clone()) {
         Some(a) => a,
         None => listen::default_address()?,
@@ -331,16 +391,32 @@ async fn run(cfg: Config, login: bool, listen_flag: Option<String>, control_flag
     let listener = listen::bind(&address).await?;
     let control_listener = listen::bind(&control_address).await?;
 
-    let hem = Arc::new(Hem::new(&url(None, Some(&cfg))?, HemOptions::default())?);   // DEV-532: https only
     let timeout = std::time::Duration::from_secs(cfg.approve_timeout.into());
     let auth = match cfg.auth {
         AuthMode::Password => Auth::Password { ttl: cfg.ttl },
         AuthMode::Remote => Auth::Remote { uv: uv(cfg.uv), timeout, password: None },
         AuthMode::RemotePassword => Auth::Remote { uv: uv(cfg.uv), timeout, password: Some(cfg.ttl) },
     };
-    let agent = HemAgent::new(hem, keys, auth.clone()).with_url(&cfg.url);
-    log::info!("hem-ssh-agent {} for {}", env!("CARGO_PKG_VERSION"), cfg.url);
-    for k in agent.keys() {
+    // reload: the configuration's address and keys and the window's choice,
+    // read again (auth, ttl and the addresses stay as started).
+    let reloader: Reloader = {
+        let (config_path, chosen) = (config_path.clone(), chosen.clone());
+        Arc::new(move || {
+            let cfg = match &config_path {
+                Some(p) if p.exists() => config::load(p)?,
+                _ => Config::default(),
+            };
+            served(&cfg, chosen.as_deref()).map_err(|e| e.to_string())
+        })
+    };
+    let agent = HemAgent::serving(first, auth.clone()).with_reloader(reloader);
+    let keys = agent.keys();
+    let url = cfg.url.clone().unwrap_or_default();
+    log::info!("hem-ssh-agent {} for {}", env!("CARGO_PKG_VERSION"), if url.is_empty() { "the window's choice" } else { &url });
+    if keys.is_empty() {
+        log::info!("no keys yet: the window's Choose keys ({})", chosen.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
+    }
+    for k in &keys {
         log::info!("key {}: {}", k.kid, k.openssh());
     }
     match auth {
@@ -417,10 +493,15 @@ fn install(config_flag: Option<PathBuf>, start: bool, no_gui: bool) -> Res<()> {
     }
     let gui = w.with_file_name("hem-ssh-agent-gui.exe");
     let use_gui = !no_gui && gui.exists();
-    // The configuration must be usable now, not at the next logon.
+    // The configuration must be usable now, not at the next logon. With the
+    // window it may leave the HEM and the keys open (the window's Choose
+    // keys); the agent alone has no one to ask.
     let config_flag = config_flag.map(std::path::absolute).transpose()?;
-    let cfg = load_config(config_flag.clone(), true)?.expect("required");
-    agent_keys(&cfg)?;
+    let cfg = load_config(config_flag.clone(), !use_gui)?.unwrap_or_default();
+    if !use_gui {
+        url(None, Some(&cfg))?;
+        agent_keys(&cfg)?;
+    }
 
     // The window takes Go-style flags and passes --config on to the agent.
     let (exe, mut args) = if use_gui { (gui, vec![]) } else { (w, vec!["run".to_owned()]) };

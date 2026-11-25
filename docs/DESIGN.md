@@ -130,20 +130,24 @@ overrides it. The framing and message shape are encedo-wg-hsm
 |---|---|
 | `{"op":"whoami"}` | `reply` with `build` and `who` (the caller's SID and pid on Windows, uid and pid on unix) |
 | `{"op":"watch"}` | `reply`, then an `event` snapshot now and on every change |
-| `{"op":"token","build":{...},"token":"..."}` | `reply` ok, or `kind` `build` / `invalid_arg` / a hem-sdk code |
+| `{"op":"token","build":{...},"token":"...","source":"phone"}` | `reply` ok, or `kind` `build` / `invalid_arg` / a hem-sdk code; `source` (`password` when absent, or `phone`) is what the snapshot reports |
 | `{"op":"lock"}` | `reply`; drops the token and the session secret |
 | `{"op":"use_password"}` | `reply`; `remote+password`: stops asking the phone, the waiting signs take the next token |
+| `{"op":"reload"}` | `reply`; reads `config.toml` and the window's `chosen.toml` again and serves the HEM and keys they name now (locks first) |
+| `{"op":"unlock_phone"}` | `reply` at once; remote modes: asks the phone for a token now (*Unlock by phone*), the wait and its end show in the snapshot |
 
-The snapshot (`Status`): `state` (`locked` / `ready` / `waiting` for the
-phone or the password), `auth` (`password` / `remote` / `remote+password`),
+The snapshot (`Status`): `state` (`unconfigured`: no HEM or no keys yet /
+`locked` / `ready` / `waiting` for the phone or the password), `auth` (`password` / `remote` / `remote+password`),
 `url` (the HEM the window logs in to), `ttl` (when the password may be used:
 the lifetime to ask for), `keys` (kid, comment), `expires_at` (unix seconds, read from
 the token), `source` (with `expires_at`: where the token came from, `phone` or
 `password`), `kept` (the session secret is kept, `ssh-add -X`: tokens without the
 phone until Lock), `pending` (the note on the phone, since when, and `password`
 once *Use password* was chosen), `last` (the
-last sign's note, `signed` / `denied` / `timeout` / `locked` / `failed`, and
-when). A whole snapshot every time, never a delta.
+last sign's note, `signed` / `unlocked` / `denied` / `timeout` / `locked` /
+`failed`, and when), `url_fixed` / `keys_fixed` (the configuration names
+them: the window shows them and does not change them), `chosen` (where the
+window writes its choice). A whole snapshot every time, never a delta.
 
 **Only the token crosses.** The window logs in to the HEM itself (password,
 via hem-sdk-go, check-in first) and hands over a token holding
@@ -197,6 +201,22 @@ not done.
 with `kid` and `pubkey` (the line `hem-ssh-agent pubkey` prints). The public
 key is in the file so the agent lists keys without a token: no phone prompt
 just to list.
+
+`url` and `[[key]]` may be left out (no file at all: password mode). The
+window then shows an address field and *Choose keys...*: it searches the HEM
+for Ed25519 keys whose description starts with `ETSSSH` - without a token
+when the HEM allows it (`allow_keysearch`, a 6-byte prefix), otherwise with
+a `keymgmt:search` token (the password typed, or the phone) - the person
+picks up to 8, their public keys are read with one `keymgmt:use:<kid>`
+token, and the window writes `chosen.toml` beside `config.toml` (the same
+`url` / `[[key]]` shape) and sends `reload`. That token holds the scopes the
+agent signs with, so the window then hands it over (`token`, `source` phone or
+password): one approval chooses the keys and unlocks the agent; refused
+(expired, keys fixed in `config.toml`), the agent stays locked. The choice travels in the file,
+not on the control channel, which still carries only tokens. What
+`config.toml` names wins; chosen keys count only with the address they were
+picked from. An unreadable `chosen.toml` at start is logged and the agent
+runs `unconfigured`.
 
 ## Security notes
 

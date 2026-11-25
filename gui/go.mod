@@ -8,17 +8,19 @@ replace github.com/encedo/hem-sdk-go => ./hem-sdk-go
 
 require (
 	fyne.io/fyne/v2 v2.8.0
+	github.com/BurntSushi/toml v1.6.0
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/encedo/hem-sdk-go v0.0.0
 	github.com/go-gl/gl v0.0.0-20260331235117-4566fea9a276
 	github.com/go-gl/glfw/v3.4/glfw v0.1.0-pre.1.0.20260707082822-2a407d02d01a
 	github.com/godbus/dbus/v5 v5.2.2
+	golang.org/x/crypto v0.37.0
 	golang.org/x/sys v0.32.0
 )
 
 require (
 	fyne.io/systray v1.12.2 // indirect
-	github.com/BurntSushi/toml v1.6.0 // indirect
+	github.com/FyshOS/fancyfs v0.0.1 // indirect
 	github.com/anthonynsimon/bild v0.14.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -44,7 +46,6 @@ require (
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/yuin/goldmark v1.8.2 // indirect
-	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
 	golang.org/x/text v0.24.0 // indirect

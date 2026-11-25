@@ -34,6 +34,18 @@ What it does:
   Unlock window - the waiting `ssh` / `git` sign takes the token it hands
   over; closing the window ends that sign unsigned. *Unlock...* also works
   beforehand, while there is no token.
+- Remote modes: *Unlock by phone* asks the phone for a token now, so the next
+  `ssh` does not wait for it.
+- The HEM's address is always shown; greyed out when `config.toml` names it.
+  When the configuration names no keys, *Choose keys...* searches the HEM
+  for its SSH keys (Ed25519, description starting with `ETSSSH`; without a
+  login when the HEM allows it, otherwise with the password typed or the
+  phone), lets the person pick up to 8, reads their public keys and writes
+  `chosen.toml` beside `config.toml`, then has the agent `reload` and hands it
+  the token that read the public keys, so the agent is unlocked by the same
+  approval. Not set up
+  yet, the tray offers *Choose keys...*. The phone prompts from this window
+  carry no note (hem-sdk-go's remote login takes none yet).
 - *Lock* or *Unlock...*, *Show*, *Show log*, *Quit*. Without a tray (GNOME without an
   extension) the window stays open and closing it quits; a tray host that
   registers later (a login autostart racing the desktop) still gets the

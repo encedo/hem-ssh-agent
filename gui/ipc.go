@@ -27,6 +27,8 @@ type Request struct {
 	Op    string `json:"op"`
 	Build *Build `json:"build,omitempty"`
 	Token string `json:"token,omitempty"`
+	// Source: op token only - "password" (absent) or "phone".
+	Source string `json:"source,omitempty"`
 }
 
 type Msg struct {
@@ -45,7 +47,7 @@ type Reply struct {
 
 // Status is the agent's whole state, sent on every change.
 type Status struct {
-	State     string    `json:"state"` // locked | ready | waiting
+	State     string    `json:"state"` // unconfigured | locked | ready | waiting
 	Auth      string    `json:"auth"`  // password | remote | remote+password
 	URL       string    `json:"url,omitempty"`
 	TTL       int       `json:"ttl,omitempty"`
@@ -58,6 +60,24 @@ type Status struct {
 	Kept    bool     `json:"kept,omitempty"`
 	Pending *Pending `json:"pending,omitempty"`
 	Last    *Last    `json:"last,omitempty"`
+	// The configuration names the address / the keys: shown, not changed.
+	URLFixed  bool `json:"url_fixed,omitempty"`
+	KeysFixed bool `json:"keys_fixed,omitempty"`
+	// Where Choose keys writes (chosen.toml); empty when both are fixed.
+	Chosen string `json:"chosen,omitempty"`
+}
+
+// canChoose: Choose keys does something - the configuration leaves the
+// keys open.
+func canChoose(s Status) bool {
+	return !s.KeysFixed && s.Chosen != ""
+}
+
+// canUnlockPhone: Unlock by phone does something - a phone mode, set up, no
+// token, the phone not asked yet.
+func canUnlockPhone(s Status) bool {
+	return (s.Auth == "remote" || s.Auth == "remote+password") && s.State != "unconfigured" &&
+		s.ExpiresAt == 0 && s.Pending == nil
 }
 
 type KeyInfo struct {
@@ -82,6 +102,9 @@ func passwordAllowed(s Status) bool {
 // canUnlock: Unlock... does something now - password mode while locked; with
 // the phone first, while there is no token (the phone would be asked).
 func canUnlock(s Status) bool {
+	if s.State == "unconfigured" {
+		return false // no keys to unlock yet: Choose keys first
+	}
 	switch s.Auth {
 	case "password":
 		return s.State != "ready"
@@ -93,7 +116,7 @@ func canUnlock(s Status) bool {
 
 type Last struct {
 	Note   string `json:"note"`
-	Result string `json:"result"` // signed | denied | timeout | locked | failed
+	Result string `json:"result"` // signed | unlocked | denied | timeout | locked | failed
 	At     int64  `json:"at"`
 }
 
